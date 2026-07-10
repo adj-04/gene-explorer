@@ -1,0 +1,563 @@
+<!DOCTYPE html>
+<html lang="en" style="background:#0a0a0a">
+<head>
+<meta charset="UTF-8">
+<meta name="color-scheme" content="dark">
+<title>Gene Structure Explorer</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+<script src="https://cdnjs.cloudflare.com/ajax/libs/3Dmol/2.0.4/3Dmol-min.js"></script>
+<style>
+  :root {
+    --bg: #0a0a0a;
+    --panel: #131311;
+    --border: #262622;
+    --text: #e8e6df;
+    --text-dim: #85837a;
+    --accent: #e8a94a;
+  }
+  * { box-sizing: border-box; }
+  html, body { background: var(--bg); }
+  body {
+    font-family: 'Space Grotesk', sans-serif;
+    color: var(--text);
+    margin: 0;
+    padding: 2.5rem 2rem 4rem;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+  }
+  .page { width: 100%; max-width: 980px; }
+  .eyebrow {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 0.7rem;
+    letter-spacing: 0.15em;
+    text-transform: uppercase;
+    color: var(--accent);
+    margin-bottom: 0.4rem;
+  }
+  h1 { font-size: 2.1rem; font-weight: 700; margin: 0 0 0.4rem; letter-spacing: -0.02em; }
+  .subtitle {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 0.8rem;
+    color: var(--text-dim);
+    margin: 0 0 1.8rem;
+  }
+  .controls { display: flex; align-items: center; gap: 1rem; margin-bottom: 1rem; flex-wrap: wrap; }
+  .controls-row2 {
+    display: flex; align-items: center; gap: 1.2rem; margin-bottom: 1.5rem;
+    flex-wrap: wrap; padding-top: 0.9rem; border-top: 1px solid var(--border);
+  }
+  .controls-row3 {
+    display: flex; align-items: center; gap: 0.8rem; margin-bottom: 1.5rem; flex-wrap: wrap;
+  }
+  input[type="text"] {
+    background: var(--panel); border: 1px solid var(--border); color: var(--text);
+    padding: 0.7rem 1rem; font-family: 'JetBrains Mono', monospace; font-size: 0.9rem;
+    width: 260px; border-radius: 4px;
+  }
+  input[type="text"]:focus { outline: none; border-color: var(--accent); }
+  select {
+    background: var(--panel); border: 1px solid var(--border); color: var(--text);
+    padding: 0.5rem 0.7rem; font-family: 'JetBrains Mono', monospace; font-size: 0.8rem;
+    border-radius: 4px; cursor: pointer;
+  }
+  button {
+    background: var(--accent); color: #1a1200; border: none; padding: 0.7rem 1.4rem;
+    font-family: 'Space Grotesk', sans-serif; font-weight: 700; font-size: 0.9rem;
+    cursor: pointer; border-radius: 4px;
+  }
+  button:hover { background: #f0b862; }
+  button.ghost {
+    background: transparent; color: var(--text-dim); border: 1px solid var(--border);
+    font-weight: 500; padding: 0.5rem 0.9rem; font-size: 0.8rem;
+  }
+  button.ghost:hover { border-color: var(--accent); color: var(--accent); }
+  .checkbox-row {
+    display: flex; align-items: center; gap: 0.5rem;
+    font-family: 'JetBrains Mono', monospace; font-size: 0.8rem; color: var(--text-dim);
+  }
+  .control-label { font-family: 'JetBrains Mono', monospace; font-size: 0.7rem; color: var(--text-dim); letter-spacing: 0.05em; }
+  .zoom-controls {
+    display: flex; align-items: center; gap: 0.3rem; background: var(--panel);
+    border: 1px solid var(--border); border-radius: 4px; padding: 0.2rem;
+  }
+  .zoom-btn {
+    background: transparent; color: var(--text); border: none; width: 30px; height: 30px;
+    padding: 0; font-size: 1.1rem; font-weight: 700; line-height: 1; border-radius: 3px; cursor: pointer;
+  }
+  .zoom-btn:hover { background: var(--accent); color: #1a1200; }
+  #viewer {
+    width: 100%; height: 640px; background: #000; border: 1px solid var(--border);
+    border-radius: 8px; position: relative; overflow: hidden; cursor: pointer;
+  }
+  .viewer-meta { display: flex; justify-content: space-between; align-items: center; margin-top: 0.7rem; flex-wrap: wrap; gap: 0.8rem; }
+  .viewer-hint { font-family: 'JetBrains Mono', monospace; font-size: 0.7rem; color: var(--text-dim); letter-spacing: 0.02em; }
+  .legend { display: flex; gap: 1rem; font-family: 'JetBrains Mono', monospace; font-size: 0.7rem; color: var(--text-dim); }
+  .legend span { display: inline-flex; align-items: center; gap: 0.35rem; }
+  .swatch { width: 9px; height: 9px; border-radius: 2px; display: inline-block; }
+  .spectrum-bar { display: flex; align-items: center; gap: 0.5rem; font-family: 'JetBrains Mono', monospace; font-size: 0.68rem; color: var(--text-dim); }
+  .spectrum-gradient { width: 100px; height: 8px; border-radius: 4px; background: linear-gradient(to right, #0000FF, #00FFFF, #00FF00, #FFFF00, #FF0000); }
+  .ss-legend { display: flex; gap: 1rem; font-family: 'JetBrains Mono', monospace; font-size: 0.7rem; color: var(--text-dim); }
+  .residue-bar {
+    margin-top: 0.7rem; padding: 0.6rem 0.9rem; background: var(--panel);
+    border: 1px solid var(--border); border-radius: 4px;
+    font-family: 'JetBrains Mono', monospace; font-size: 0.8rem; color: var(--text-dim);
+    min-height: 1.4rem;
+  }
+  .residue-bar strong { color: var(--accent); }
+  #info { margin-top: 2rem; display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 1.5rem; }
+  .field { border-top: 1px solid var(--border); padding-top: 0.8rem; }
+  .field-label {
+    font-family: 'JetBrains Mono', monospace; font-size: 0.68rem; letter-spacing: 0.1em;
+    text-transform: uppercase; color: var(--accent); margin-bottom: 0.4rem;
+  }
+  .field-value { font-size: 0.92rem; line-height: 1.55; color: var(--text); }
+  .field-value.mono { font-family: 'JetBrains Mono', monospace; font-size: 0.85rem; }
+  .field-value.scroll { max-height: 130px; overflow-y: auto; padding-right: 0.5rem; }
+  .field-value.scroll::-webkit-scrollbar { width: 6px; }
+  .field-value.scroll::-webkit-scrollbar-thumb { background: var(--border); border-radius: 3px; }
+  .field.wide { grid-column: 1 / -1; }
+  .ref-item { padding: 0.6rem 0; border-bottom: 1px solid var(--border); font-size: 0.85rem; line-height: 1.4; }
+  .ref-item:last-child { border-bottom: none; }
+  .ref-item a { color: var(--accent); text-decoration: none; }
+  .ref-item a:hover { text-decoration: underline; }
+  .ref-item .ref-title-link { font-family: 'Space Grotesk', sans-serif; font-size: 0.85rem; color: var(--accent); display: block; margin-bottom: 0.2rem; }
+  .ref-item .ref-meta { color: var(--text-dim); font-family: 'JetBrains Mono', monospace; font-size: 0.72rem; }
+  .status { font-family: 'JetBrains Mono', monospace; font-size: 0.85rem; color: var(--text-dim); margin-top: 0.8rem; }
+  .status.err { color: #e07a5f; }
+  .empty-state {
+    height: 100%; display: flex; align-items: center; justify-content: center;
+    color: var(--text-dim); font-family: 'JetBrains Mono', monospace; font-size: 0.85rem;
+  }
+  .learn-section { margin-top: 2.5rem; border-top: 1px solid var(--border); padding-top: 1.5rem; }
+  .learn-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 0.9rem; margin-top: 1rem; }
+  .learn-card {
+    display: block; background: var(--panel); border: 1px solid var(--border);
+    border-radius: 6px; padding: 0.9rem 1rem; text-decoration: none;
+    transition: border-color 0.15s;
+  }
+  .learn-card:hover { border-color: var(--accent); }
+  .learn-name {
+    font-family: 'Space Grotesk', sans-serif; font-weight: 700; font-size: 0.9rem;
+    color: var(--text); margin-bottom: 0.25rem;
+  }
+  .learn-desc {
+    font-family: 'JetBrains Mono', monospace; font-size: 0.72rem; color: var(--text-dim);
+  }
+  .learn-empty {
+    font-family: 'JetBrains Mono', monospace; font-size: 0.8rem; color: var(--text-dim);
+    margin-top: 1rem;
+  }
+  .field.collapsible .field-label {
+    display: flex; align-items: center; justify-content: space-between; cursor: pointer;
+    user-select: none;
+  }
+  .field.collapsible .field-label .caret {
+    font-size: 0.7rem; color: var(--text-dim); transition: transform 0.15s;
+  }
+  .field.collapsible.open .field-label .caret { transform: rotate(90deg); }
+  .field.collapsible .ss-detail {
+    display: none; margin-top: 0.7rem; font-family: 'JetBrains Mono', monospace;
+    font-size: 0.78rem; color: var(--text-dim); line-height: 1.6;
+  }
+  .field.collapsible.open .ss-detail { display: block; }
+  .ss-bar-row { display: flex; align-items: center; gap: 0.6rem; margin-top: 0.35rem; }
+  .ss-bar-track { flex: 1; height: 6px; border-radius: 3px; background: var(--border); overflow: hidden; }
+  .ss-bar-fill { height: 100%; border-radius: 3px; }
+</style>
+</head>
+<body>
+<div class="page">
+  <div class="eyebrow">Structural biology / AlphaFold DB</div>
+  <h1>Gene Structure Explorer</h1>
+  <div class="subtitle">Search any human gene — structure, annotation, and literature in one view</div>
+
+  <div class="controls">
+    <input id="geneInput" type="text" placeholder="e.g. TP53, INS, HBB, CTCF, PLAGL2" />
+    <button onclick="loadGene()">Search</button>
+  </div>
+
+  <div class="controls-row2">
+    <span class="control-label">STYLE</span>
+    <select id="styleSelect" onchange="applyColoring()">
+      <option value="cartoon">Cartoon</option>
+      <option value="sphere">Sphere (backbone)</option>
+      <option value="stick">Stick</option>
+    </select>
+
+    <span class="control-label">COLOR</span>
+    <select id="colorSelect" onchange="applyColoring()">
+      <option value="confidence">Confidence (pLDDT)</option>
+      <option value="secondary">Secondary structure</option>
+      <option value="spectrum">Spectrum</option>
+      <option value="chain">Chain</option>
+    </select>
+
+    <label class="checkbox-row">
+      <input type="checkbox" id="spinToggle" onchange="toggleSpin()">
+      Auto-rotate
+    </label>
+
+    <button class="ghost" onclick="resetView()">Reset view</button>
+
+    <div class="zoom-controls">
+      <button class="zoom-btn" onclick="zoomOut()">&minus;</button>
+      <button class="zoom-btn" onclick="zoomIn()">+</button>
+    </div>
+  </div>
+
+  <div class="controls-row3">
+    <button class="ghost" onclick="downloadPDB()">Download PDB</button>
+    <button class="ghost" onclick="downloadPNG()">Download PNG snapshot</button>
+  </div>
+
+  <div id="viewer"><div class="empty-state" id="emptyState">Search a gene to load its structure</div></div>
+
+  <div class="viewer-meta">
+    <div class="viewer-hint">drag to rotate &middot; scroll to zoom &middot; click a residue to inspect it</div>
+    <div class="legend" id="legend-confidence">
+      <span><span class="swatch" style="background:#0053D6"></span>very high (90+)</span>
+      <span><span class="swatch" style="background:#65CBF3"></span>confident (70-90)</span>
+      <span><span class="swatch" style="background:#FFDB13"></span>low (50-70)</span>
+      <span><span class="swatch" style="background:#FF7D45"></span>very low (&lt;50)</span>
+    </div>
+    <div class="spectrum-bar" id="legend-spectrum" style="display:none;">
+      <span>N-terminus</span>
+      <div class="spectrum-gradient"></div>
+      <span>C-terminus</span>
+    </div>
+    <div class="ss-legend" id="legend-secondary" style="display:none;">
+      <span><span class="swatch" style="background:#e8a94a"></span>helix</span>
+      <span><span class="swatch" style="background:#5eaefc"></span>sheet</span>
+      <span><span class="swatch" style="background:#85837a"></span>coil</span>
+    </div>
+  </div>
+
+  <div class="residue-bar" id="residueBar">Click any residue in the structure to inspect it.</div>
+
+  <div id="status" class="status"></div>
+  <div id="info"></div>
+
+  <div class="learn-section">
+    <div class="eyebrow">Read more</div>
+    <div id="learnGrid" class="learn-grid"></div>
+    <div id="learnEmpty" class="learn-empty">Search a gene to see linked resources.</div>
+  </div>
+</div>
+
+<script>
+let viewer = null;
+let model = null;
+let spinning = false;
+let currentPdbData = "";
+let currentGeneName = "";
+let lastSS = null;
+
+window.addEventListener("load", () => {
+  try {
+    document.getElementById("emptyState").remove();
+    viewer = $3Dmol.createViewer("viewer", { backgroundColor: 0x000000 });
+    viewer.render();
+    attachGentleZoom(document.getElementById("viewer"), () => viewer);
+  } catch (e) {
+    setStatus("Viewer failed to initialize: " + e.message, true);
+    console.error(e);
+  }
+
+  document.getElementById("geneInput").addEventListener("keydown", (e) => {
+    if (e.key === "Enter") loadGene();
+  });
+});
+
+function attachGentleZoom(el, getViewer) {
+  el.addEventListener("wheel", (e) => {
+    const v = getViewer();
+    if (!v) return;
+    e.preventDefault();
+    e.stopPropagation();
+    const factor = e.deltaY > 0 ? 0.97 : 1.03;
+    v.zoom(factor, 0);
+    v.render();
+  }, { passive: false, capture: true });
+}
+
+async function fetchUniprotAccession(gene, organismClause) {
+  const url = `https://rest.uniprot.org/uniprotkb/search?query=gene:${gene}+AND+reviewed:true${organismClause}&fields=accession,protein_name,organism_name,length,mass,cc_function,cc_disease,gene_names,cc_subcellular_location&format=json&size=1`;
+  const res = await fetch(url);
+  if (!res.ok) throw new Error("Unable to contact UniProt.");
+  const data = await res.json();
+  if (!data.results || data.results.length === 0) return null;
+  return data.results[0];
+}
+
+async function fetchAlphaFoldStructure(accession) {
+  const metaRes = await fetch(`https://alphafold.ebi.ac.uk/api/prediction/${accession}`);
+  if (!metaRes.ok) return null;
+  const metaData = await metaRes.json();
+  if (!metaData || metaData.length === 0) return null;
+  const pdbRes = await fetch(metaData[0].pdbUrl);
+  if (!pdbRes.ok) return null;
+  return await pdbRes.text();
+}
+
+function setStatus(msg, isErr) {
+  const s = document.getElementById("status");
+  s.textContent = msg || "";
+  s.className = "status" + (isErr ? " err" : "");
+}
+
+function renderInfo(fields) {
+  const info = document.getElementById("info");
+  info.innerHTML = fields.map((f, idx) => `
+    <div class="field${f.wide ? ' wide' : ''}${f.collapsible ? ' collapsible' : ''}" ${f.collapsible ? `id="${f.id}"` : ''}>
+      <div class="field-label" ${f.collapsible ? `onclick="toggleCollapsible('${f.id}')"` : ''}>
+        ${f.label}${f.collapsible ? '<span class="caret">&#9656;</span>' : ''}
+      </div>
+      <div class="field-value${f.mono ? ' mono' : ''}${f.scroll ? ' scroll' : ''}">${f.value}</div>
+      ${f.detail ? `<div class="ss-detail">${f.detail}</div>` : ''}
+    </div>
+  `).join("");
+}
+
+function toggleCollapsible(id) {
+  const el = document.getElementById(id);
+  if (el) el.classList.toggle("open");
+}
+
+function cleanText(t) {
+  if (!t) return "";
+  return t.replace(/\(PubMed:\d+(,\s*PubMed:\d+)*\)/gi, "")
+           .replace(/\[PubMed:\d+\]/gi, "")
+           .replace(/\s{2,}/g, " ")
+           .trim();
+}
+
+function renderLearnLinks(gene, accession, geneId) {
+  const links = [
+    { name: "UniProt", url: `https://www.uniprot.org/uniprotkb/${accession}/entry`, desc: "Full curated protein record" },
+    { name: "AlphaFold DB", url: `https://alphafold.ebi.ac.uk/entry/${accession}`, desc: "Source page for this structure" },
+    { name: "GeneCards", url: `https://www.genecards.org/cgi-bin/carddisp.pl?gene=${encodeURIComponent(gene)}`, desc: "Aggregated gene summary" },
+    { name: "RCSB PDB", url: `https://www.rcsb.org/search?q=${encodeURIComponent(gene)}`, desc: "Experimentally solved structures, if any" },
+    { name: "PubMed", url: `https://pubmed.ncbi.nlm.nih.gov/?term=${encodeURIComponent(gene + " Homo sapiens")}`, desc: "Full literature search" },
+    { name: "Ensembl", url: `https://www.ensembl.org/Homo_sapiens/Gene/Summary?g=${encodeURIComponent(gene)}`, desc: "Genomic context, transcripts, variants" },
+    { name: "STRING", url: `https://string-db.org/network/${encodeURIComponent(gene)}`, desc: "Protein-protein interaction network" }
+  ];
+  if (geneId && geneId !== "-") {
+    links.splice(2, 0, { name: "NCBI Gene", url: `https://www.ncbi.nlm.nih.gov/gene/${geneId}`, desc: "Genomic location, aliases, expression" });
+  }
+  document.getElementById("learnEmpty").style.display = "none";
+  document.getElementById("learnGrid").innerHTML = links.map(l => `
+    <a class="learn-card" href="${l.url}" target="_blank" rel="noopener">
+      <div class="learn-name">${l.name}</div>
+      <div class="learn-desc">${l.desc}</div>
+    </a>
+  `).join("");
+}
+
+function computeSecondaryStructureStats() {
+  if (!model) return null;
+  const atoms = model.selectedAtoms({ atom: "CA" });
+  if (atoms.length === 0) return null;
+  let helix = 0, sheet = 0, coil = 0;
+  atoms.forEach(a => {
+    if (a.ss === "h") helix++;
+    else if (a.ss === "s") sheet++;
+    else coil++;
+  });
+  const total = atoms.length;
+  return {
+    helix: ((helix / total) * 100).toFixed(0),
+    sheet: ((sheet / total) * 100).toFixed(0),
+    coil: ((coil / total) * 100).toFixed(0),
+    helixCount: helix,
+    sheetCount: sheet,
+    coilCount: coil,
+    total
+  };
+}
+
+function ssDetailHtml(ss) {
+  if (!ss) return "";
+  const row = (label, color, pct, count) => `
+    <div>${label} &middot; ${pct}% (${count} residues)</div>
+    <div class="ss-bar-row">
+      <div class="ss-bar-track"><div class="ss-bar-fill" style="width:${pct}%;background:${color}"></div></div>
+    </div>`;
+  return `
+    ${row("Helix", "#e8a94a", ss.helix, ss.helixCount)}
+    ${row("Sheet", "#5eaefc", ss.sheet, ss.sheetCount)}
+    ${row("Coil", "#85837a", ss.coil, ss.coilCount)}
+    <div style="margin-top:0.5rem;">Total residues modeled: ${ss.total}</div>
+  `;
+}
+
+async function loadGene() {
+  if (!viewer) { setStatus("Viewer not ready yet, try again in a second.", true); return; }
+  const rawInput = document.getElementById("geneInput").value.trim();
+  if (!rawInput) return;
+  const gene = rawInput.toUpperCase();
+  currentGeneName = gene;
+  setStatus("Searching " + gene + "...");
+  document.getElementById("info").innerHTML = "";
+  document.getElementById("residueBar").innerHTML = "Click any residue in the structure to inspect it.";
+
+  try {
+    const protein = await fetchUniprotAccession(gene, "+AND+organism_id:9606");
+    if (!protein) {
+      setStatus("No reviewed UniProt entry found for " + gene, true);
+      return;
+    }
+    const accession = protein.primaryAccession;
+    const proteinName = protein.proteinDescription?.recommendedName?.fullName?.value || "Unknown";
+    const length = protein.sequence?.length || 0;
+    const mass = protein.sequence?.molWeight ? (protein.sequence.molWeight / 1000).toFixed(1) + " kDa" : "-";
+    const functionText = cleanText(protein.comments?.find(c => c.commentType === "FUNCTION")?.texts?.[0]?.value) || "No function summary available.";
+    const diseaseText = cleanText(protein.comments?.find(c => c.commentType === "DISEASE")?.disease?.description) || "No disease association listed.";
+
+    const synonyms = (protein.genes?.[0]?.synonyms || []).map(s => s.value);
+    const aliases = synonyms.length > 0 ? synonyms.join(", ") : "No known aliases listed.";
+
+    const subcellLocs = (protein.comments?.find(c => c.commentType === "SUBCELLULAR_LOCATION")?.subcellularLocations || [])
+      .map(l => l.location?.value).filter(Boolean);
+    const subcellText = subcellLocs.length > 0 ? subcellLocs.join(", ") : "Not annotated.";
+
+    setStatus("Fetching structure...");
+    const pdbData = await fetchAlphaFoldStructure(accession);
+    if (!pdbData) { setStatus(`No AlphaFold structure available for ${accession}`, true); return; }
+    currentPdbData = pdbData;
+
+    viewer.clear();
+    model = viewer.addModel(pdbData, "pdb");
+    applyColoring();
+    viewer.zoomTo();
+    viewer.render();
+
+    viewer.setClickable({}, true, (atom) => {
+      if (!atom) return;
+      const confidence = atom.b ? atom.b.toFixed(1) : "-";
+      document.getElementById("residueBar").innerHTML =
+        `<strong>${atom.resn} ${atom.resi}</strong> &middot; chain ${atom.chain} &middot; confidence (pLDDT): ${confidence}`;
+    });
+
+    const ss = computeSecondaryStructureStats();
+    lastSS = ss;
+
+    setStatus("Fetching references...");
+    let refsHtml = "No linked publications found.";
+    let geneId = "-";
+    try {
+      const fullRes = await fetch(`https://rest.uniprot.org/uniprotkb/${accession}.json`);
+      if (fullRes.ok) {
+        const fullData = await fullRes.json();
+        const geneIdEntry = (fullData.uniProtKBCrossReferences || []).find(x => x.database === "GeneID");
+        if (geneIdEntry) geneId = geneIdEntry.id;
+
+        const refs = (fullData.references || []).slice(0, 12).map(r => {
+          const pmid = (r.citationCrossReferences || []).find(x => x.database === "PubMed")?.id;
+          const title = r.citation?.title || "Untitled";
+          const journal = r.citation?.journal || "";
+          const year = r.citation?.publicationDate || "";
+          const titleHtml = pmid
+            ? `<a class="ref-title-link" href="https://pubmed.ncbi.nlm.nih.gov/${pmid}/" target="_blank" rel="noopener">${title}</a>`
+            : `<span class="ref-title-link" style="color:var(--text);">${title}</span>`;
+          const linkLine = pmid ? `<a href="https://pubmed.ncbi.nlm.nih.gov/${pmid}/" target="_blank" rel="noopener">PMID:${pmid} &rarr;</a>` : "";
+          return `<div class="ref-item">${titleHtml}<div class="ref-meta">${journal} ${year}</div>${linkLine}</div>`;
+        });
+        if (refs.length > 0) refsHtml = refs.join("");
+      }
+    } catch (e) { console.error("reference fetch failed", e); }
+
+    setStatus("");
+    renderInfo([
+      { label: "Gene", value: `${gene} &middot; ${accession}`, mono: true },
+      { label: "NCBI Gene ID", value: geneId, mono: true },
+      { label: "Protein", value: proteinName },
+      { label: "Aliases", value: aliases },
+      { label: "Subcellular location", value: subcellText },
+      { label: "Length / mass", value: `${length} aa &middot; ${mass}`, mono: true },
+      {
+        label: "Secondary structure",
+        value: ss ? `${ss.helix}% helix &middot; ${ss.sheet}% sheet &middot; ${ss.coil}% coil &middot; click to expand` : "-",
+        mono: true,
+        collapsible: true,
+        id: "ssField",
+        detail: ssDetailHtml(ss)
+      },
+      { label: "Function", value: functionText, scroll: true, wide: true },
+      { label: "Disease association", value: diseaseText, wide: true },
+      { label: "Referenced papers", value: refsHtml, scroll: true, wide: true }
+    ]);
+
+    renderLearnLinks(gene, accession, geneId);
+
+  } catch (err) {
+    console.error(err);
+    setStatus(err.message, true);
+  }
+}
+
+function applyColoring() {
+  if (!viewer || !model) return;
+  const colorMode = document.getElementById("colorSelect").value;
+  const styleMode = document.getElementById("styleSelect").value;
+
+  viewer.setStyle({}, {});
+
+  let colorSpec;
+  if (colorMode === "confidence") colorSpec = { colorfunc: (atom) => plddtColor(atom.b) };
+  else if (colorMode === "chain") colorSpec = { color: "chain" };
+  else if (colorMode === "secondary") colorSpec = { color: "ssPyMOL" };
+  else colorSpec = { color: "spectrum" };
+
+  if (styleMode === "sphere") {
+    viewer.setStyle({ atom: "CA" }, { sphere: { ...colorSpec, radius: 1.1 } });
+  } else {
+    const styleObj = {};
+    styleObj[styleMode] = colorSpec;
+    viewer.setStyle({}, styleObj);
+  }
+
+  document.getElementById("legend-confidence").style.display = colorMode === "confidence" ? "flex" : "none";
+  document.getElementById("legend-spectrum").style.display = colorMode === "spectrum" ? "flex" : "none";
+  document.getElementById("legend-secondary").style.display = colorMode === "secondary" ? "flex" : "none";
+
+  viewer.render();
+}
+
+function toggleSpin() {
+  spinning = document.getElementById("spinToggle").checked;
+  if (viewer) viewer.spin(spinning ? "y" : false);
+}
+
+function resetView() { if (viewer && model) { viewer.zoomTo(); viewer.render(); } }
+function zoomIn() { if (viewer && model) { viewer.zoom(1.2, 200); viewer.render(); } }
+function zoomOut() { if (viewer && model) { viewer.zoom(0.8, 200); viewer.render(); } }
+
+function plddtColor(b) {
+  if (b > 90) return "#0053D6";
+  if (b > 70) return "#65CBF3";
+  if (b > 50) return "#FFDB13";
+  return "#FF7D45";
+}
+
+function downloadPDB() {
+  if (!currentPdbData) return;
+  const blob = new Blob([currentPdbData], { type: "chemical/x-pdb" });
+  const a = document.createElement("a");
+  a.href = URL.createObjectURL(blob);
+  a.download = `${currentGeneName || "structure"}.pdb`;
+  a.click();
+}
+
+function downloadPNG() {
+  if (!viewer || !model) return;
+  const uri = viewer.pngURI();
+  const a = document.createElement("a");
+  a.href = uri;
+  a.download = `${currentGeneName || "structure"}.png`;
+  a.click();
+}
+</script>
+</body>
+</html>
