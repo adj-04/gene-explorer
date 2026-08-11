@@ -1,8 +1,8 @@
 # Gene Structure Explorer
 
 A single-file, browser-based tool for looking up any human gene and getting its
-predicted 3D protein structure, key annotation, and linked literature — all in
-one view.
+predicted 3D protein structure, genomic location, key annotation, and linked
+literature — all in one view.
 
 ## What it does
 
@@ -15,8 +15,10 @@ app will:
 4. Surface annotation: protein name, aliases, subcellular location,
    length/mass, secondary structure composition, function summary, and
    disease associations.
-5. Pull the linked PubMed references from UniProt.
-6. Link out to related resources for deeper reading.
+5. Look up the gene's chromosome, cytogenetic band, and coordinates, and
+   render its position on a full human karyotype.
+6. Pull the linked PubMed references from UniProt.
+7. Link out to related resources for deeper reading.
 
 ## Features
 
@@ -28,6 +30,9 @@ app will:
 - **Auto-rotate** toggle and manual zoom/reset controls.
 - **Collapsible secondary structure panel** — click the label to expand a
   helix/sheet/coil breakdown with percentage bars and residue counts.
+- **Genomic location panel** — full human karyotype (Ideogram.js) with the
+  searched gene's chromosome highlighted in red; click the highlight to open
+  the gene's NCBI record.
 - **Download** the raw PDB file or a PNG snapshot of the current view.
 - **Read more** — quick links to UniProt, AlphaFold DB, NCBI Gene, GeneCards,
   RCSB PDB, PubMed, Ensembl, and STRING for the searched gene.
@@ -35,10 +40,12 @@ app will:
 ## Data sources
 
 | Source | Used for |
-|---|---|
+| --- | --- |
 | [UniProt REST API](https://www.uniprot.org/help/api) | Protein identity, function, disease, subcellular location, references |
 | [AlphaFold DB API](https://alphafold.ebi.ac.uk/api-docs) | Predicted structure (PDB file) |
+| [NCBI E-utilities](https://www.ncbi.nlm.nih.gov/books/NBK25501/) | Chromosome, cytogenetic band, and genomic coordinates |
 | [3Dmol.js](https://3dmol.csb.pitt.edu/) | In-browser structure rendering |
+| [Ideogram.js](https://eweitz.github.io/ideogram/) | In-browser chromosome/karyotype rendering |
 
 All lookups are restricted to human (`organism_id:9606`), reviewed
 (Swiss-Prot) UniProt entries only.
@@ -55,6 +62,8 @@ All lookups are restricted to human (`organism_id:9606`), reviewed
 - Secondary structure percentages are computed from the AlphaFold model's own
   per-residue `ss` assignment, not an independent DSSP run.
 - Reference list is capped at the first 12 entries UniProt returns.
+- The genomic location panel requires the gene to have an NCBI GeneID
+  cross-reference in UniProt; a small number of entries lack one.
 
 ## Ideas for later
 
