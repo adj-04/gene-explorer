@@ -7,6 +7,7 @@
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
 <script src="https://cdnjs.cloudflare.com/ajax/libs/3Dmol/2.0.4/3Dmol-min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/ideogram@1.53.0/dist/js/ideogram.min.js"></script>
 <style>
   :root {
     --bg: #0a0a0a;
@@ -130,6 +131,25 @@
     height: 100%; display: flex; align-items: center; justify-content: center;
     color: var(--text-dim); font-family: 'JetBrains Mono', monospace; font-size: 0.85rem;
   }
+  .location-section {
+    margin-top: 2.5rem; border-top: 1px solid var(--border); padding-top: 1.5rem; display: none;
+  }
+  .location-meta {
+    display: inline-block;
+    font-family: 'JetBrains Mono', monospace; font-size: 0.95rem; font-weight: 700;
+    color: var(--bg); background: var(--accent);
+    padding: 0.5rem 0.9rem; border-radius: 5px;
+    margin: 0.3rem 0 1.2rem;
+  }
+  .ideo-container {
+    width: 100%; overflow-x: auto; background: var(--panel); border: 1px solid var(--border);
+    border-radius: 8px; padding: 1rem 0.5rem;
+  }
+  .ideo-container svg { display: block; margin: 0 auto; }
+  .ideo-hint {
+    font-family: 'JetBrains Mono', monospace; font-size: 0.7rem; color: var(--text-dim);
+    margin-top: 0.6rem;
+  }
   .learn-section { margin-top: 2.5rem; border-top: 1px solid var(--border); padding-top: 1.5rem; }
   .learn-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 0.9rem; margin-top: 1rem; }
   .learn-card {
@@ -239,6 +259,13 @@
   <div id="status" class="status"></div>
   <div id="info"></div>
 
+  <div class="location-section" id="locationSection">
+    <div class="eyebrow">Genomic location</div>
+    <div class="location-meta" id="ideoLocText"></div>
+    <div class="ideo-container" id="ideoContainer"></div>
+    <div class="ideo-hint" id="ideoHint"></div>
+  </div>
+
   <div class="learn-section">
     <div class="eyebrow">Read more</div>
     <div id="learnGrid" class="learn-grid"></div>
@@ -299,6 +326,97 @@ async function fetchAlphaFoldStructure(accession) {
   const pdbRes = await fetch(metaData[0].pdbUrl);
   if (!pdbRes.ok) return null;
   return await pdbRes.text();
+}
+
+async function fetchGenomicLocation(geneId) {
+  if (!geneId || geneId === "-") return null;
+  const url = `https://eutils.ncbi.nlm.nih.gov/entrez/eutils/esummary.fcgi?db=gene&id=${geneId}&retmode=json`;
+  const res = await fetch(url);
+  if (!res.ok) return null;
+  const data = await res.json();
+  const doc = data.result?.[geneId];
+  if (!doc) return null;
+  const gi = (doc.genomicinfo || [])[0];
+  const chr = doc.chromosome || gi?.chrloc;
+  if (!chr || !gi) return null;
+  const a = parseInt(gi.chrstart, 10);
+  const b = parseInt(gi.chrstop, 10);
+  if (isNaN(a) || isNaN(b)) return null;
+  return {
+    chr: String(chr),
+    mapLocation: doc.maplocation || "",
+    start: Math.min(a, b),
+    stop: Math.max(a, b)
+  };
+}
+
+let currentIdeogram = null;
+
+function renderIdeogram(loc, geneSymbol, geneId) {
+  const section = document.getElementById("locationSection");
+  const container = document.getElementById("ideoContainer");
+  const hint = document.getElementById("ideoHint");
+  container.innerHTML = "";
+  hint.textContent = "";
+  currentIdeogram = null;
+
+  if (!loc) {
+    section.style.display = "none";
+    return;
+  }
+  if (typeof Ideogram === "undefined") {
+    section.style.display = "block";
+    hint.textContent = "Chromosome diagram library failed to load (check your network connection).";
+    return;
+  }
+
+  section.style.display = "block";
+  document.getElementById("ideoLocText").textContent =
+    `Chromosome ${loc.chr}${loc.mapLocation ? " · band " + loc.mapLocation : ""} · ` +
+    `chr${loc.chr}:${loc.start.toLocaleString()}-${loc.stop.toLocaleString()}`;
+
+  const annotation = [{
+    name: geneSymbol,
+    chr: loc.chr,
+    start: loc.start,
+    stop: loc.stop,
+    color: "#ff4d4d"
+  }];
+
+  // Ideogram.js doesn't have a documented click-on-annotation callback, so
+  // after the ideogram loads we manually attach a click handler to the
+  // rendered annotation element to link out to NCBI Gene.
+  function wireClickThrough() {
+    if (!geneId || geneId === "-") return;
+    const annots = container.querySelectorAll('[class*="annot"]');
+    annots.forEach((el) => {
+      el.style.cursor = "pointer";
+      el.addEventListener("click", () => {
+        window.open(`https://www.ncbi.nlm.nih.gov/gene/${geneId}`, "_blank", "noopener");
+      });
+    });
+  }
+
+  try {
+    currentIdeogram = new Ideogram({
+      container: "#ideoContainer",
+      organism: "human",
+      chrHeight: 300,
+      rotatable: false,
+      annotationsLayout: "overlay",
+      annotationHeight: 6,
+      annotations: annotation,
+      onLoad: wireClickThrough
+    });
+  } catch (e) {
+    console.error("Ideogram render failed", e);
+    hint.textContent = "Couldn't render the chromosome diagram: " + e.message;
+    return;
+  }
+
+  hint.textContent = geneId && geneId !== "-"
+    ? `Red mark shows ${geneSymbol}'s position · click it to open the NCBI Gene page`
+    : `Red mark shows ${geneSymbol}'s position on the chromosome`;
 }
 
 function setStatus(msg, isErr) {
@@ -401,6 +519,9 @@ async function loadGene() {
   setStatus("Searching " + gene + "...");
   document.getElementById("info").innerHTML = "";
   document.getElementById("residueBar").innerHTML = "Click any residue in the structure to inspect it.";
+  document.getElementById("locationSection").style.display = "none";
+  document.getElementById("ideoContainer").innerHTML = "";
+  document.getElementById("ideoHint").textContent = "";
 
   try {
     const protein = await fetchUniprotAccession(gene, "+AND+organism_id:9606");
@@ -467,6 +588,11 @@ async function loadGene() {
         if (refs.length > 0) refsHtml = refs.join("");
       }
     } catch (e) { console.error("reference fetch failed", e); }
+
+    try {
+      const loc = await fetchGenomicLocation(geneId);
+      renderIdeogram(loc, gene, geneId);
+    } catch (e) { console.error("genomic location fetch failed", e); }
 
     setStatus("");
     renderInfo([
