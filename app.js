@@ -1,487 +1,412 @@
-const CACHE_PREFIX = "gene-explorer:v2:";
-const CACHE_TTL_MS = 24 * 60 * 60 * 1000;
-const MAX_RETRIES = 3;
-const RETRY_BASE_MS = 600;
+
+"use strict";
 
 let viewer = null;
 let model = null;
 let spinning = false;
 let currentPdbData = "";
 let currentGeneName = "";
-let currentAccession = "";
-let currentGeneId = "-";
 let lastSS = null;
-let currentIdeogram = null;
-let activeRequest = 0;
-let requestController = null;
-const memoryCache = new Map();
 
-const $ = (id) => document.getElementById(id);
+const CACHE_KEY = "gene-explorer-cache-v1";
+const CACHE_TTL_MS = 24 * 60 * 60 * 1000;
+const REQUEST_TIMEOUT_MS = 20000;
+const MAX_RETRIES = 3;
+let activeController = null;
+let requestSequence = 0;
 
-window.addEventListener("DOMContentLoaded", init);
+function getCache() {
+  try { return JSON.parse(localStorage.getItem(CACHE_KEY) || "{}"); }
+  catch { return {}; }
+}
+function setCache(cache) {
+  try { localStorage.setItem(CACHE_KEY, JSON.stringify(cache)); }
+  catch (e) { console.warn("Cache write failed:", e); }
+}
+function cacheGet(key) {
+  const item = getCache()[key];
+  if (!item || Date.now() - item.timestamp > CACHE_TTL_MS) return null;
+  return item.value;
+}
+function cacheSet(key, value) {
+  const cache = getCache();
+  cache[key] = { timestamp: Date.now(), value };
+  setCache(cache);
+}
+function cacheKey(type, key) {
+  return `${type}:${String(key).toUpperCase()}`;
+}
 
-function init() {
-  bindEvents();
-  try {
-    $("emptyState")?.remove();
-    viewer = $3Dmol.createViewer("viewer", { backgroundColor: 0x000000 });
-    viewer.render();
-    attachGentleZoom($("viewer"), () => viewer);
-  } catch (error) {
-    console.error(error);
-    setStatus(`Viewer failed to initialize: ${error.message}`, true);
-    return;
+function sleep(ms) {
+  return new Promise(resolve => setTimeout(resolve, ms));
+}
+
+function retryDelay(attempt, retryAfter) {
+  if (retryAfter) {
+    const seconds = Number(retryAfter);
+    if (Number.isFinite(seconds)) return Math.min(seconds * 1000, 10000);
   }
+  return Math.min(1000 * 2 ** attempt, 8000) + Math.floor(Math.random() * 250);
 }
 
-function bindEvents() {
-  $("searchButton").addEventListener("click", loadGene);
-  $("geneInput").addEventListener("keydown", (event) => {
-    if (event.key === "Enter") loadGene();
-  });
-  $("styleSelect").addEventListener("change", applyColoring);
-  $("colorSelect").addEventListener("change", applyColoring);
-  $("spinToggle").addEventListener("change", toggleSpin);
-  $("resetButton").addEventListener("click", resetView);
-  $("zoomInButton").addEventListener("click", zoomIn);
-  $("zoomOutButton").addEventListener("click", zoomOut);
-  $("downloadPdbButton").addEventListener("click", downloadPDB);
-  $("downloadPngButton").addEventListener("click", downloadPNG);
-}
-
-function attachGentleZoom(element, getViewer) {
-  element.addEventListener("wheel", (event) => {
-    const activeViewer = getViewer();
-    if (!activeViewer) return;
-    event.preventDefault();
-    event.stopPropagation();
-    activeViewer.zoom(event.deltaY > 0 ? 0.97 : 1.03, 0);
-    activeViewer.render();
-  }, { passive: false, capture: true });
-}
-
-async function fetchJson(url, { signal, label = "request" } = {}) {
-  return fetchWithRetry(url, {
-    signal,
-    label,
-    parse: async (response) => response.json()
-  });
-}
-
-async function fetchText(url, { signal, label = "request" } = {}) {
-  return fetchWithRetry(url, {
-    signal,
-    label,
-    parse: async (response) => response.text()
-  });
-}
-
-async function fetchWithRetry(url, { signal, label, parse, retries = MAX_RETRIES } = {}) {
+async function apiFetch(url, options = {}, { retries = MAX_RETRIES, timeout = REQUEST_TIMEOUT_MS, signal } = {}) {
   let lastError;
   for (let attempt = 0; attempt <= retries; attempt++) {
     if (signal?.aborted) throw new DOMException("Request cancelled", "AbortError");
+    const controller = new AbortController();
+    const onAbort = () => controller.abort();
+    signal?.addEventListener("abort", onAbort, { once: true });
+    const timer = setTimeout(() => controller.abort(), timeout);
     try {
-      const response = await fetch(url, { signal });
-      if (response.ok) return await parse(response);
-
+      const response = await fetch(url, { ...options, signal: controller.signal });
+      clearTimeout(timer);
+      signal?.removeEventListener("abort", onAbort);
+      if (response.ok) return response;
       const retryable = response.status === 429 || response.status >= 500;
       if (!retryable || attempt === retries) {
-        throw new Error(`${label} failed (HTTP ${response.status}).`);
+        throw new Error(`Request failed (${response.status})`);
       }
-
-      const retryAfter = Number(response.headers.get("Retry-After"));
-      const delay = Number.isFinite(retryAfter) && retryAfter > 0
-        ? retryAfter * 1000
-        : RETRY_BASE_MS * (2 ** attempt) + Math.random() * 250;
-      await sleep(delay, signal);
+      await sleep(retryDelay(attempt, response.headers.get("Retry-After")));
     } catch (error) {
-      if (error.name === "AbortError") throw error;
-      lastError = error;
-      if (attempt === retries) break;
-      await sleep(RETRY_BASE_MS * (2 ** attempt) + Math.random() * 250, signal);
-    }
-  }
-  throw lastError || new Error(`${label} failed.`);
-}
-
-function sleep(ms, signal) {
-  return new Promise((resolve, reject) => {
-    const timer = setTimeout(resolve, ms);
-    signal?.addEventListener("abort", () => {
       clearTimeout(timer);
-      reject(new DOMException("Request cancelled", "AbortError"));
-    }, { once: true });
-  });
-}
-
-function cacheKey(gene) {
-  return `${CACHE_PREFIX}${gene}`;
-}
-
-function getCachedGene(gene) {
-  if (memoryCache.has(gene)) {
-    const entry = memoryCache.get(gene);
-    if (entry.expiresAt > Date.now()) return entry.data;
-    memoryCache.delete(gene);
-  }
-
-  try {
-    const raw = localStorage.getItem(cacheKey(gene));
-    if (!raw) return null;
-    const entry = JSON.parse(raw);
-    if (!entry?.data || entry.expiresAt <= Date.now()) {
-      localStorage.removeItem(cacheKey(gene));
-      return null;
+      signal?.removeEventListener("abort", onAbort);
+      if (error.name === "AbortError") {
+        if (signal?.aborted) throw new DOMException("Request cancelled", "AbortError");
+        lastError = new Error("Request timed out.");
+      } else {
+        lastError = error;
+      }
+      if (attempt === retries) throw lastError;
+      await sleep(retryDelay(attempt));
     }
-    memoryCache.set(gene, entry);
-    return entry.data;
-  } catch (error) {
-    console.warn("Cache read failed:", error);
-    return null;
   }
+  throw lastError || new Error("Request failed.");
 }
 
-function setCachedGene(gene, data) {
-  const entry = { cachedAt: Date.now(), expiresAt: Date.now() + CACHE_TTL_MS, data };
-  memoryCache.set(gene, entry);
-  try {
-    localStorage.setItem(cacheKey(gene), JSON.stringify(entry));
-  } catch (error) {
-    // PDB files can be large enough to hit browser storage quotas.
-    console.warn("Persistent cache unavailable; keeping this result in memory only.", error);
-  }
-}
-
-function clearCurrentResults() {
-  $("info").innerHTML = "";
-  $("residueBar").textContent = "Click any residue in the structure to inspect it.";
-  hideLocation();
-  $("learnGrid").innerHTML = "";
-  $("learnEmpty").style.display = "block";
-  currentPdbData = "";
-  currentAccession = "";
-  currentGeneId = "-";
-  lastSS = null;
-  model = null;
-  if (viewer) {
-    viewer.clear();
-    viewer.render();
-  }
+function setStatus(msg, isErr = false, loading = false) {
+  const s = document.getElementById("status");
+  s.textContent = msg || "";
+  s.className = "status" + (isErr ? " err" : "") + (loading ? " loading" : "");
 }
 
 function setLoading(loading) {
-  $("searchButton").disabled = loading;
-  $("geneInput").disabled = loading;
-  $("searchButton").textContent = loading ? "Loading…" : "Search";
+  ["geneInput","searchButton","styleSelect","colorSelect","spinToggle","resetButton",
+   "zoomOutButton","zoomInButton","downloadPdbButton","downloadPngButton"]
+    .forEach(id => { const el = document.getElementById(id); if (el) el.disabled = loading; });
+  document.getElementById("searchButton").textContent = loading ? "Loading…" : "Search";
 }
 
-function setStatus(message, isError = false, isSuccess = false) {
-  const status = $("status");
-  status.textContent = message || "";
-  status.className = `status${isError ? " err" : ""}${isSuccess ? " success" : ""}`;
-}
-
-function isCurrent(requestId) {
-  return requestId === activeRequest;
-}
-
-async function loadGene() {
-  if (!viewer) {
-    setStatus("Viewer not ready yet, try again in a second.", true);
-    return;
+function resetResultPanels() {
+  document.getElementById("info").innerHTML = "";
+  document.getElementById("learnGrid").innerHTML = "";
+  document.getElementById("learnEmpty").style.display = "block";
+  document.getElementById("residueBar").textContent = "Click any residue in the structure to inspect it.";
+  document.getElementById("locationSection").style.display = "none";
+  document.getElementById("interproSection").hidden = true;
+  document.getElementById("interproMeta").textContent = "";
+  document.getElementById("domainMap").innerHTML = "";
+  document.getElementById("domainScale").innerHTML = "";
+  document.getElementById("interproList").innerHTML = "";
+  document.getElementById("interproHint").textContent = "";
+  document.getElementById("ideoContainer").innerHTML = "";
+  document.getElementById("ideoHint").textContent = "";
+  document.getElementById("ideoLocText").textContent = "";
+  currentIdeogram = null;
+  currentPdbData = "";
+  model = null;
+  if (viewer) {
+    try { viewer.clear(); viewer.render(); } catch (e) { console.warn("Viewer reset failed:", e); }
   }
-  if ($("searchButton").disabled) return;
+}
 
-  const gene = $("geneInput").value.trim().toUpperCase();
-  if (!gene) {
-    setStatus("Enter a gene symbol first.", true);
-    $("geneInput").focus();
-    return;
-  }
+function isCurrentRequest(id) {
+  return id === requestSequence;
+}
 
-  if (requestController) requestController.abort();
-  requestController = new AbortController();
-  const signal = requestController.signal;
-  const requestId = ++activeRequest;
-
-  currentGeneName = gene;
-  clearCurrentResults();
-  setLoading(true);
-  setStatus(`Searching ${gene}…`);
-
+window.addEventListener("load", () => {
   try {
-    let data = getCachedGene(gene);
-    const fromCache = Boolean(data);
-
-    if (!data) {
-      const protein = await fetchUniprotAccession(gene, signal);
-      if (!isCurrent(requestId)) return;
-      if (!protein) {
-        setStatus(`No reviewed human UniProt entry found for ${gene}.`, true);
-        return;
-      }
-
-      const accession = protein.primaryAccession;
-      setStatus(`Loading AlphaFold structure for ${accession}…`);
-      const pdbData = await fetchAlphaFoldStructure(accession, signal);
-      if (!isCurrent(requestId)) return;
-
-      data = {
-        protein,
-        accession,
-        pdbData,
-        geneId: "-",
-        refsHtml: "No linked publications found.",
-        location: null
-      };
-
-      // Independent stages: failure of references/location must not discard the usable structure.
-      setStatus("Loading annotations…");
-      try {
-        const fullData = await fetchUniprotFull(accession, signal);
-        data.geneId = getGeneId(fullData);
-        data.refsHtml = renderReferences(fullData);
-      } catch (error) {
-        if (error.name === "AbortError") throw error;
-        console.warn("Reference/GeneID stage failed:", error);
-        data.annotationError = "References could not be loaded.";
-      }
-
-      if (data.geneId !== "-") {
-        try {
-          setStatus("Loading genomic location…");
-          data.location = await fetchGenomicLocation(data.geneId, signal);
-        } catch (error) {
-          if (error.name === "AbortError") throw error;
-          console.warn("Genomic location stage failed:", error);
-          data.locationError = "Genomic location could not be loaded.";
-        }
-      }
-
-      setCachedGene(gene, data);
-    }
-
-    if (!isCurrent(requestId)) return;
-    renderGene(data, gene);
-
-    const warnings = [];
-    if (data.annotationError) warnings.push(data.annotationError);
-    if (data.locationError) warnings.push(data.locationError);
-    if (!data.location && data.geneId !== "-") warnings.push("Genomic location unavailable.");
-    setStatus(
-      fromCache
-        ? `Loaded ${gene} from local cache${warnings.length ? ` · ${warnings.join(" ")}` : ""}`
-        : warnings.length
-          ? `Loaded ${gene} with warnings: ${warnings.join(" ")}`
-          : `Loaded ${gene}.`,
-      false,
-      true
-    );
-  } catch (error) {
-    if (error.name === "AbortError" || !isCurrent(requestId)) return;
-    console.error(error);
-    setStatus(error.message || "Something went wrong while loading this gene.", true);
-  } finally {
-    if (isCurrent(requestId)) {
-      setLoading(false);
-      requestController = null;
-    }
+    const empty = document.getElementById("emptyState");
+    if (empty) empty.remove();
+    viewer = $3Dmol.createViewer("viewer", { backgroundColor: 0x000000 });
+    viewer.render();
+    attachGentleZoom(document.getElementById("viewer"), () => viewer);
+  } catch (e) {
+    setStatus("Viewer failed to initialize: " + e.message, true);
+    console.error(e);
   }
+
+  document.getElementById("searchButton").addEventListener("click", loadGene);
+  document.getElementById("geneInput").addEventListener("keydown", e => {
+    if (e.key === "Enter" && !e.repeat) loadGene();
+  });
+  document.getElementById("styleSelect").addEventListener("change", applyColoring);
+  document.getElementById("colorSelect").addEventListener("change", applyColoring);
+  document.getElementById("spinToggle").addEventListener("change", toggleSpin);
+  document.getElementById("resetButton").addEventListener("click", resetView);
+  document.getElementById("zoomInButton").addEventListener("click", zoomIn);
+  document.getElementById("zoomOutButton").addEventListener("click", zoomOut);
+  document.getElementById("downloadPdbButton").addEventListener("click", downloadPDB);
+  document.getElementById("downloadPngButton").addEventListener("click", downloadPNG);
+
+  document.getElementById("info").addEventListener("click", e => {
+    const toggle = e.target.closest(".collapsible-toggle");
+    if (toggle) toggleCollapsible(toggle.dataset.target);
+  });
+});;
+
+function attachGentleZoom(el, getViewer) {
+  el.addEventListener("wheel", (e) => {
+    const v = getViewer();
+    if (!v) return;
+    e.preventDefault();
+    e.stopPropagation();
+    const factor = e.deltaY > 0 ? 0.97 : 1.03;
+    v.zoom(factor, 0);
+    v.render();
+  }, { passive: false, capture: true });
 }
 
-async function fetchUniprotAccession(gene, signal) {
-  const query = encodeURIComponent(`gene:${gene} AND reviewed:true AND organism_id:9606`);
-  const url = `https://rest.uniprot.org/uniprotkb/search?query=${query}&fields=accession,protein_name,organism_name,length,mass,cc_function,cc_disease,gene_names,cc_subcellular_location&format=json&size=1`;
-  const data = await fetchJson(url, { signal, label: "UniProt search" });
-  return data.results?.[0] || null;
+async function fetchUniprotAccession(gene, organismClause, signal) {
+  const key = cacheKey("uniprot-search", gene);
+  const cached = cacheGet(key);
+  if (cached) return cached;
+  const url = `https://rest.uniprot.org/uniprotkb/search?query=gene:${gene}+AND+reviewed:true${organismClause}&fields=accession,protein_name,organism_name,length,mass,cc_function,cc_disease,gene_names,cc_subcellular_location&format=json&size=1`;
+  const res = await apiFetch(url, {}, { signal });
+  const data = await res.json();
+  const result = data.results?.[0] || null;
+  if (result) cacheSet(key, result);
+  return result;
 }
 
 async function fetchAlphaFoldStructure(accession, signal) {
-  const metaData = await fetchJson(`https://alphafold.ebi.ac.uk/api/prediction/${encodeURIComponent(accession)}`, {
-    signal, label: "AlphaFold metadata"
-  });
-  if (!Array.isArray(metaData) || !metaData.length || !metaData[0].pdbUrl) {
-    throw new Error(`No AlphaFold structure available for ${accession}.`);
-  }
-  const pdbData = await fetchText(metaData[0].pdbUrl, { signal, label: "AlphaFold structure" });
-  if (!pdbData.trim()) throw new Error(`AlphaFold returned an empty structure for ${accession}.`);
-  return pdbData;
+  const key = cacheKey("alphafold-pdb", accession);
+  const cached = cacheGet(key);
+  if (cached) return cached;
+  const metaRes = await apiFetch(`https://alphafold.ebi.ac.uk/api/prediction/${accession}`, {}, { signal });
+  const metaData = await metaRes.json();
+  if (!metaData?.length || !metaData[0]?.pdbUrl) return null;
+  const pdbRes = await apiFetch(metaData[0].pdbUrl, {}, { signal });
+  const pdb = await pdbRes.text();
+  if (pdb) cacheSet(key, pdb);
+  return pdb || null;
 }
 
-async function fetchUniprotFull(accession, signal) {
-  return fetchJson(`https://rest.uniprot.org/uniprotkb/${encodeURIComponent(accession)}.json`, {
-    signal, label: "UniProt annotations"
+async function fetchInterProAnnotations(accession, signal) {
+  const key = cacheKey("interpro", accession);
+  const cached = cacheGet(key);
+  if (cached) return cached;
+
+  let url = `https://www.ebi.ac.uk/interpro/api/entry/interpro/protein/uniprot/${encodeURIComponent(accession)}/?page_size=200`;
+  const results = [];
+  let pages = 0;
+
+  while (url && pages < 10) {
+    const res = await apiFetch(url, { headers: { Accept: "application/json" } }, { signal });
+    const data = await res.json();
+    results.push(...(data.results || []));
+    url = data.next || null;
+    pages++;
+  }
+
+  const normalized = results.map(entry => {
+    const metadata = entry.metadata || {};
+    const protein = entry.proteins?.[0] || {};
+    const locations = protein.entry_protein_locations || [];
+    const fragments = locations.flatMap(location =>
+      (location.fragments || []).map(fragment => ({
+        start: Number(fragment.start),
+        end: Number(fragment.end),
+        representative: fragment.representative === true
+      }))
+    ).filter(f => Number.isFinite(f.start) && Number.isFinite(f.end) && f.start > 0 && f.end >= f.start);
+
+    return {
+      accession: metadata.accession || "",
+      name: typeof metadata.name === "string" ? metadata.name : (metadata.name?.name || "Unnamed InterPro entry"),
+      type: metadata.type || "feature",
+      fragments
+    };
+  }).filter(entry => entry.accession);
+
+  cacheSet(key, normalized);
+  return normalized;
+}
+
+function interProTypeLabel(type) {
+  return String(type || "feature").replace(/_/g, " ");
+}
+
+function interProTypeClass(type) {
+  const t = String(type || "").toLowerCase();
+  if (t.includes("domain")) return "domain";
+  if (t.includes("family")) return "family";
+  if (t.includes("superfamily")) return "superfamily";
+  if (t.includes("repeat")) return "repeat";
+  return "feature";
+}
+
+function renderInterPro(entries, proteinLength) {
+  const section = document.getElementById("interproSection");
+  const meta = document.getElementById("interproMeta");
+  const map = document.getElementById("domainMap");
+  const scale = document.getElementById("domainScale");
+  const list = document.getElementById("interproList");
+  const hint = document.getElementById("interproHint");
+
+  section.hidden = false;
+  map.innerHTML = "";
+  scale.innerHTML = "";
+  list.innerHTML = "";
+  hint.textContent = "";
+
+  if (!entries?.length) {
+    meta.textContent = "No InterPro entries were found for this protein.";
+    hint.textContent = "InterPro does not have a classified family, domain, or sequence feature for every protein.";
+    return;
+  }
+
+  const length = Number(proteinLength) || Math.max(1, ...entries.flatMap(e => e.fragments.map(f => f.end)));
+  const locatedEntries = entries.filter(e => e.fragments.length > 0);
+  meta.textContent = `${entries.length} InterPro entr${entries.length === 1 ? "y" : "ies"} · ${locatedEntries.length} with sequence coordinates · protein length ${length} aa`;
+
+  const track = document.createElement("div");
+  track.className = "domain-track";
+  map.appendChild(track);
+
+  const colors = {
+    domain: "#e8a94a",
+    family: "#8aa7d9",
+    superfamily: "#9b8fd4",
+    repeat: "#78bfa0",
+    feature: "#85837a"
+  };
+
+  locatedEntries.forEach(entry => {
+    const color = colors[interProTypeClass(entry.type)] || colors.feature;
+    entry.fragments.forEach(fragment => {
+      const left = Math.max(0, Math.min(100, ((fragment.start - 1) / length) * 100));
+      const width = Math.max(0.7, Math.min(100 - left, ((fragment.end - fragment.start + 1) / length) * 100));
+      const bar = document.createElement("a");
+      bar.className = "domain-bar";
+      bar.href = `https://www.ebi.ac.uk/interpro/entry/InterPro/${encodeURIComponent(entry.accession)}/`;
+      bar.target = "_blank";
+      bar.rel = "noopener";
+      bar.style.left = `${left}%`;
+      bar.style.width = `${width}%`;
+      bar.style.background = color;
+      bar.setAttribute("aria-label", `${entry.accession}: ${entry.name}, residues ${fragment.start} to ${fragment.end}`);
+      bar.title = `${entry.accession} · ${entry.name} · residues ${fragment.start}-${fragment.end}`;
+      track.appendChild(bar);
+
+      const label = document.createElement("span");
+      label.className = "domain-label";
+      label.style.left = `${Math.min(98, Math.max(2, left + width / 2))}%`;
+      label.textContent = entry.name;
+      label.title = `${entry.name} (${fragment.start}-${fragment.end})`;
+      track.appendChild(label);
+    });
   });
+
+  const scaleStart = document.createElement("span");
+  scaleStart.textContent = "1 aa";
+  const scaleEnd = document.createElement("span");
+  scaleEnd.textContent = `${length} aa`;
+  scale.append(scaleStart, scaleEnd);
+
+  const sorted = [...entries].sort((a, b) => {
+    const af = a.fragments[0]?.start ?? Infinity;
+    const bf = b.fragments[0]?.start ?? Infinity;
+    return af - bf || a.accession.localeCompare(b.accession);
+  });
+
+  sorted.forEach(entry => {
+    const item = document.createElement("div");
+    item.className = "interpro-item";
+    const ranges = entry.fragments.length
+      ? entry.fragments.map(f => `${f.start}-${f.end}`).join(", ") + " aa"
+      : "No sequence coordinates";
+    item.innerHTML = `
+      <div class="interpro-item-head">
+        <a href="https://www.ebi.ac.uk/interpro/entry/InterPro/${encodeURIComponent(entry.accession)}/" target="_blank" rel="noopener">${escapeHtml(entry.accession)}</a>
+        <span class="interpro-type">${escapeHtml(interProTypeLabel(entry.type))}</span>
+      </div>
+      <div class="interpro-name">${escapeHtml(entry.name)}</div>
+      <div class="interpro-range">${escapeHtml(ranges)}</div>
+    `;
+    list.appendChild(item);
+  });
+
+  hint.textContent = "Bars show InterPro sequence coordinates. Click an InterPro accession or bar to open its curated entry.";
 }
 
 async function fetchGenomicLocation(geneId, signal) {
   if (!geneId || geneId === "-") return null;
-  const url = `https://eutils.ncbi.nlm.nih.gov/entrez/eutils/esummary.fcgi?db=gene&id=${encodeURIComponent(geneId)}&retmode=json`;
-  const data = await fetchJson(url, { signal, label: "NCBI genomic location" });
+  const key = cacheKey("ncbi-location", geneId);
+  const cached = cacheGet(key);
+  if (cached) return cached;
+  const url = `https://eutils.ncbi.nlm.nih.gov/entrez/eutils/esummary.fcgi?db=gene&id=${geneId}&retmode=json`;
+  const res = await apiFetch(url, {}, { signal });
+  const data = await res.json();
   const doc = data.result?.[geneId];
   if (!doc) return null;
-
   const gi = (doc.genomicinfo || [])[0];
   const chr = doc.chromosome || gi?.chrloc;
   if (!chr || !gi) return null;
-
-  const a = parseInt(gi.chrstart, 10);
-  const b = parseInt(gi.chrstop, 10);
-  if (Number.isNaN(a) || Number.isNaN(b)) return null;
-
-  return {
-    chr: String(chr),
-    mapLocation: doc.maplocation || "",
-    start: Math.min(a, b),
-    stop: Math.max(a, b)
-  };
+  const a = parseInt(gi.chrstart, 10), b = parseInt(gi.chrstop, 10);
+  if (isNaN(a) || isNaN(b)) return null;
+  const loc = { chr: String(chr), mapLocation: doc.maplocation || "", start: Math.min(a,b), stop: Math.max(a,b) };
+  cacheSet(key, loc);
+  return loc;
 }
 
-function renderGene(data, gene) {
-  const protein = data.protein;
-  const accession = data.accession;
-  currentAccession = accession;
-  currentGeneId = data.geneId || "-";
-  currentPdbData = data.pdbData;
 
-  const proteinName = protein.proteinDescription?.recommendedName?.fullName?.value || "Unknown";
-  const length = protein.sequence?.length || 0;
-  const mass = protein.sequence?.molWeight
-    ? `${(protein.sequence.molWeight / 1000).toFixed(1)} kDa`
-    : "-";
-  const functionText = cleanText(
-    protein.comments?.find(c => c.commentType === "FUNCTION")?.texts?.[0]?.value
-  ) || "No function summary available.";
-  const diseaseText = cleanText(
-    protein.comments?.find(c => c.commentType === "DISEASE")?.disease?.description
-  ) || "No disease association listed.";
-  const synonyms = (protein.genes?.[0]?.synonyms || []).map(s => s.value);
-  const aliases = synonyms.length ? synonyms.join(", ") : "No known aliases listed.";
-  const subcellLocs = (protein.comments?.find(c => c.commentType === "SUBCELLULAR_LOCATION")?.subcellularLocations || [])
-    .map(l => l.location?.value).filter(Boolean);
-  const subcellText = subcellLocs.length ? subcellLocs.join(", ") : "Not annotated.";
-
-  viewer.clear();
-  model = viewer.addModel(data.pdbData, "pdb");
-  applyColoring();
-  viewer.zoomTo();
-  viewer.render();
-
-  viewer.setClickable({}, true, (atom) => {
-    if (!atom) return;
-    const confidence = atom.b != null ? atom.b.toFixed(1) : "-";
-    $("residueBar").innerHTML =
-      `<strong>${escapeHtml(atom.resn || "Residue")} ${escapeHtml(String(atom.resi ?? ""))}</strong>` +
-      ` · chain ${escapeHtml(atom.chain || "-")} · confidence (pLDDT): ${escapeHtml(confidence)}`;
-    $("residueBar").focus({ preventScroll: true });
-  });
-
-  lastSS = computeSecondaryStructureStats();
-
-  renderInfo([
-    { label: "Gene", value: `${escapeHtml(gene)} · ${escapeHtml(accession)}`, mono: true },
-    { label: "NCBI Gene ID", value: escapeHtml(currentGeneId), mono: true },
-    { label: "Protein", value: escapeHtml(proteinName) },
-    { label: "Aliases", value: escapeHtml(aliases) },
-    { label: "Subcellular location", value: escapeHtml(subcellText) },
-    { label: "Length / mass", value: `${length} aa · ${escapeHtml(mass)}`, mono: true },
-    {
-      label: "Secondary structure",
-      value: lastSS
-        ? `${lastSS.helix}% helix · ${lastSS.sheet}% sheet · ${lastSS.coil}% coil · click to expand`
-        : "-",
-      mono: true, collapsible: true, id: "ssField", detail: ssDetailHtml(lastSS)
-    },
-    { label: "Function", value: escapeHtml(functionText), scroll: true, wide: true },
-    { label: "Disease association", value: escapeHtml(diseaseText), wide: true },
-    { label: "Referenced papers", value: data.refsHtml || "No linked publications found.", scroll: true, wide: true }
-  ]);
-
-  renderLearnLinks(gene, accession, currentGeneId);
-  renderIdeogram(data.location, gene, currentGeneId);
-}
-
-function renderInfo(fields) {
-  $("info").innerHTML = fields.map((field) => `
-    <div class="field${field.wide ? " wide" : ""}${field.collapsible ? " collapsible" : ""}" ${field.collapsible ? `id="${field.id}"` : ""}>
-      <div class="field-label" ${field.collapsible ? `role="button" tabindex="0" aria-expanded="false" data-toggle="${field.id}"` : ""}>
-        ${field.label}${field.collapsible ? '<span class="caret">&#9656;</span>' : ""}
-      </div>
-      <div class="field-value${field.mono ? " mono" : ""}${field.scroll ? " scroll" : ""}">${field.value}</div>
-      ${field.detail ? `<div class="ss-detail">${field.detail}</div>` : ""}
-    </div>
-  `).join("");
-
-  $("info").querySelectorAll("[data-toggle]").forEach((control) => {
-    const toggle = () => toggleCollapsible(control.dataset.toggle);
-    control.addEventListener("click", toggle);
-    control.addEventListener("keydown", (event) => {
-      if (event.key === "Enter" || event.key === " ") {
-        event.preventDefault();
-        toggle();
-      }
-    });
-  });
-}
-
-function toggleCollapsible(id) {
-  const field = $(id);
-  const control = field?.querySelector("[data-toggle]");
-  if (!field || !control) return;
-  const open = field.classList.toggle("open");
-  control.setAttribute("aria-expanded", String(open));
-}
-
-function renderReferences(fullData) {
-  const refs = (fullData.references || []).slice(0, 12).map((reference) => {
-    const pmid = (reference.citationCrossReferences || []).find(x => x.database === "PubMed")?.id;
-    const title = reference.citation?.title || "Untitled";
-    const journal = reference.citation?.journal || "";
-    const year = reference.citation?.publicationDate || "";
-    const safeTitle = escapeHtml(title);
-    const pubmedUrl = pmid ? `https://pubmed.ncbi.nlm.nih.gov/${encodeURIComponent(pmid)}/` : "";
-    const titleHtml = pmid
-      ? `<a class="ref-title-link" href="${pubmedUrl}" target="_blank" rel="noopener noreferrer">${safeTitle}</a>`
-      : `<span class="ref-title-link" style="color:var(--text);">${safeTitle}</span>`;
-    const linkLine = pmid
-      ? `<a href="${pubmedUrl}" target="_blank" rel="noopener noreferrer">PMID:${escapeHtml(String(pmid))} →</a>`
-      : "";
-    return `<div class="ref-item">${titleHtml}<div class="ref-meta">${escapeHtml(`${journal} ${year}`.trim())}</div>${linkLine}</div>`;
-  });
-  return refs.length ? refs.join("") : "No linked publications found.";
-}
-
-function getGeneId(fullData) {
-  return (fullData.uniProtKBCrossReferences || []).find(x => x.database === "GeneID")?.id || "-";
-}
-
-function renderIdeogram(location, geneSymbol, geneId) {
-  const section = $("locationSection");
-  const container = $("ideoContainer");
-  const hint = $("ideoHint");
+function renderIdeogram(loc, geneSymbol, geneId) {
+  const section = document.getElementById("locationSection");
+  const container = document.getElementById("ideoContainer");
+  const hint = document.getElementById("ideoHint");
   container.innerHTML = "";
   hint.textContent = "";
   currentIdeogram = null;
 
-  if (!location) {
+  if (!loc) {
     section.hidden = true;
+    section.style.display = "none";
+    return;
+  }
+  if (typeof Ideogram === "undefined") {
+    section.hidden = false;
+    section.style.display = "block";
+    hint.textContent = "Chromosome diagram library failed to load (check your network connection).";
     return;
   }
 
   section.hidden = false;
-  $("ideoLocText").textContent =
-    `Chromosome ${location.chr}${location.mapLocation ? ` · band ${location.mapLocation}` : ""} · ` +
-    `chr${location.chr}:${location.start.toLocaleString()}-${location.stop.toLocaleString()}`;
-
-  if (typeof Ideogram === "undefined") {
-    hint.textContent = "Chromosome diagram library failed to load. The rest of the gene data is still available.";
-    return;
-  }
+  section.style.display = "block";
+  document.getElementById("ideoLocText").textContent =
+    `Chromosome ${loc.chr}${loc.mapLocation ? " · band " + loc.mapLocation : ""} · ` +
+    `chr${loc.chr}:${loc.start.toLocaleString()}-${loc.stop.toLocaleString()}`;
 
   const annotation = [{
-    name: geneSymbol, chr: location.chr,
-    start: location.start, stop: location.stop, color: "#ff4d4d"
+    name: geneSymbol,
+    chr: loc.chr,
+    start: loc.start,
+    stop: loc.stop,
+    color: "#ff4d4d"
   }];
+
+  // Ideogram.js doesn't have a documented click-on-annotation callback, so
+  // after the ideogram loads we manually attach a click handler to the
+  // rendered annotation element to link out to NCBI Gene.
+  function wireClickThrough() {
+    if (!geneId || geneId === "-") return;
+    const annots = container.querySelectorAll('[class*="annot"]');
+    annots.forEach((el) => {
+      el.style.cursor = "pointer";
+      el.addEventListener("click", () => {
+        window.open(`https://www.ncbi.nlm.nih.gov/gene/${geneId}`, "_blank", "noopener");
+      });
+    });
+  }
 
   try {
     currentIdeogram = new Ideogram({
@@ -492,69 +417,69 @@ function renderIdeogram(location, geneSymbol, geneId) {
       annotationsLayout: "overlay",
       annotationHeight: 6,
       annotations: annotation,
-      onLoad: wireIdeogramClick
+      onLoad: wireClickThrough
     });
-    hint.textContent = geneId !== "-"
-      ? `Red mark shows ${geneSymbol}'s position · click it to open the NCBI Gene page`
-      : `Red mark shows ${geneSymbol}'s position on the chromosome`;
-  } catch (error) {
-    console.error("Ideogram render failed:", error);
-    hint.textContent = `Couldn't render the chromosome diagram: ${error.message}`;
+  } catch (e) {
+    console.error("Ideogram render failed", e);
+    hint.textContent = "Couldn't render the chromosome diagram: " + e.message;
+    return;
   }
 
-  function wireIdeogramClick() {
-    if (!geneId || geneId === "-") return;
-    container.querySelectorAll('[class*="annot"]').forEach((element) => {
-      element.style.cursor = "pointer";
-      element.setAttribute("role", "link");
-      element.setAttribute("tabindex", "0");
-      element.setAttribute("aria-label", `Open NCBI Gene page for ${geneSymbol}`);
-      const open = () => window.open(
-        `https://www.ncbi.nlm.nih.gov/gene/${encodeURIComponent(geneId)}`,
-        "_blank", "noopener,noreferrer"
-      );
-      element.addEventListener("click", open);
-      element.addEventListener("keydown", (event) => {
-        if (event.key === "Enter" || event.key === " ") {
-          event.preventDefault();
-          open();
-        }
-      });
-    });
+  hint.textContent = geneId && geneId !== "-"
+    ? `Red mark shows ${geneSymbol}'s position · click it to open the NCBI Gene page`
+    : `Red mark shows ${geneSymbol}'s position on the chromosome`;
+}
+
+
+function renderInfo(fields) {
+  const info = document.getElementById("info");
+  info.innerHTML = fields.map((f, idx) => `
+    <div class="field${f.wide ? ' wide' : ''}${f.collapsible ? ' collapsible' : ''}" ${f.collapsible ? `id="${f.id}"` : ''}>
+      <div class="field-label">
+        ${f.collapsible ? `<button type="button" class="collapsible-toggle" data-target="${f.id}" aria-expanded="false">${f.label}<span class="caret">&#9656;</span></button>` : f.label}
+      </div>
+      <div class="field-value${f.mono ? ' mono' : ''}${f.scroll ? ' scroll' : ''}">${f.value}</div>
+      ${f.detail ? `<div class="ss-detail">${f.detail}</div>` : ''}
+    </div>
+  `).join("");
+}
+
+function toggleCollapsible(id) {
+  const el = document.getElementById(id);
+  const button = el?.querySelector(".collapsible-toggle");
+  if (el) {
+    const open = el.classList.toggle("open");
+    button?.setAttribute("aria-expanded", String(open));
   }
 }
 
-function hideLocation() {
-  $("locationSection").hidden = true;
-  $("ideoContainer").innerHTML = "";
-  $("ideoLocText").textContent = "";
-  $("ideoHint").textContent = "";
-  currentIdeogram = null;
+function cleanText(t) {
+  if (!t) return "";
+  return t.replace(/\(PubMed:\d+(,\s*PubMed:\d+)*\)/gi, "")
+           .replace(/\[PubMed:\d+\]/gi, "")
+           .replace(/\s{2,}/g, " ")
+           .trim();
 }
 
 function renderLearnLinks(gene, accession, geneId) {
-  const encodedGene = encodeURIComponent(gene);
   const links = [
-    { name:"UniProt", url:`https://www.uniprot.org/uniprotkb/${encodeURIComponent(accession)}/entry`, desc:"Full curated protein record" },
-    { name:"AlphaFold DB", url:`https://alphafold.ebi.ac.uk/entry/${encodeURIComponent(accession)}`, desc:"Source page for this structure" },
-    { name:"GeneCards", url:`https://www.genecards.org/cgi-bin/carddisp.pl?gene=${encodedGene}`, desc:"Aggregated gene summary" },
-    { name:"RCSB PDB", url:`https://www.rcsb.org/search?q=${encodedGene}`, desc:"Experimentally solved structures, if any" },
-    { name:"PubMed", url:`https://pubmed.ncbi.nlm.nih.gov/?term=${encodeURIComponent(gene + " Homo sapiens")}`, desc:"Full literature search" },
-    { name:"Ensembl", url:`https://www.ensembl.org/Homo_sapiens/Gene/Summary?g=${encodedGene}`, desc:"Genomic context, transcripts, variants" },
-    { name:"STRING", url:`https://string-db.org/network/${encodedGene}`, desc:"Protein-protein interaction network" }
+    { name: "UniProt", url: `https://www.uniprot.org/uniprotkb/${accession}/entry`, desc: "Full curated protein record" },
+    { name: "AlphaFold DB", url: `https://alphafold.ebi.ac.uk/entry/${accession}`, desc: "Source page for this structure" },
+    { name: "InterPro", url: `https://www.ebi.ac.uk/interpro/search/text/${encodeURIComponent(accession)}/`, desc: "Protein families, domains and features" },
+    { name: "GeneCards", url: `https://www.genecards.org/cgi-bin/carddisp.pl?gene=${encodeURIComponent(gene)}`, desc: "Aggregated gene summary" },
+    { name: "RCSB PDB", url: `https://www.rcsb.org/search?q=${encodeURIComponent(gene)}`, desc: "Experimentally solved structures, if any" },
+    { name: "PubMed", url: `https://pubmed.ncbi.nlm.nih.gov/?term=${encodeURIComponent(gene + " Homo sapiens")}`, desc: "Full literature search" },
+    { name: "Ensembl", url: `https://www.ensembl.org/Homo_sapiens/Gene/Summary?g=${encodeURIComponent(gene)}`, desc: "Genomic context, transcripts, variants" },
+    { name: "STRING", url: `https://string-db.org/network/${encodeURIComponent(gene)}`, desc: "Protein-protein interaction network" }
   ];
-  if (geneId !== "-") {
-    links.splice(2, 0, {
-      name:"NCBI Gene", url:`https://www.ncbi.nlm.nih.gov/gene/${encodeURIComponent(geneId)}`,
-      desc:"Genomic location, aliases, expression"
-    });
+  if (geneId && geneId !== "-") {
+    links.splice(2, 0, { name: "NCBI Gene", url: `https://www.ncbi.nlm.nih.gov/gene/${geneId}`, desc: "Genomic location, aliases, expression" });
   }
-
-  $("learnEmpty").style.display = "none";
-  $("learnGrid").innerHTML = links.map(link => `
-    <a class="learn-card" href="${link.url}" target="_blank" rel="noopener noreferrer">
-      <div class="learn-name">${escapeHtml(link.name)}</div>
-      <div class="learn-desc">${escapeHtml(link.desc)}</div>
+  document.getElementById("learnEmpty").style.display = "none";
+  document.getElementById("learnGrid").innerHTML = links.map(l => `
+    <a class="learn-card" href="${l.url}" target="_blank" rel="noopener">
+      <div class="learn-name">${l.name}</div>
+      <div class="learn-desc">${l.desc}</div>
     </a>
   `).join("");
 }
@@ -562,11 +487,11 @@ function renderLearnLinks(gene, accession, geneId) {
 function computeSecondaryStructureStats() {
   if (!model) return null;
   const atoms = model.selectedAtoms({ atom: "CA" });
-  if (!atoms.length) return null;
+  if (atoms.length === 0) return null;
   let helix = 0, sheet = 0, coil = 0;
-  atoms.forEach(atom => {
-    if (atom.ss === "h") helix++;
-    else if (atom.ss === "s") sheet++;
+  atoms.forEach(a => {
+    if (a.ss === "h") helix++;
+    else if (a.ss === "s") sheet++;
     else coil++;
   });
   const total = atoms.length;
@@ -574,102 +499,252 @@ function computeSecondaryStructureStats() {
     helix: ((helix / total) * 100).toFixed(0),
     sheet: ((sheet / total) * 100).toFixed(0),
     coil: ((coil / total) * 100).toFixed(0),
-    helixCount: helix, sheetCount: sheet, coilCount: coil, total
+    helixCount: helix,
+    sheetCount: sheet,
+    coilCount: coil,
+    total
   };
 }
 
 function ssDetailHtml(ss) {
   if (!ss) return "";
   const row = (label, color, pct, count) => `
-    <div>${label} · ${pct}% (${count} residues)</div>
+    <div>${label} &middot; ${pct}% (${count} residues)</div>
     <div class="ss-bar-row">
       <div class="ss-bar-track"><div class="ss-bar-fill" style="width:${pct}%;background:${color}"></div></div>
     </div>`;
-  return `${row("Helix","#e8a94a",ss.helix,ss.helixCount)}
-    ${row("Sheet","#5eaefc",ss.sheet,ss.sheetCount)}
-    ${row("Coil","#85837a",ss.coil,ss.coilCount)}
-    <div style="margin-top:.5rem;">Total residues modeled: ${ss.total}</div>`;
+  return `
+    ${row("Helix", "#e8a94a", ss.helix, ss.helixCount)}
+    ${row("Sheet", "#5eaefc", ss.sheet, ss.sheetCount)}
+    ${row("Coil", "#85837a", ss.coil, ss.coilCount)}
+    <div style="margin-top:0.5rem;">Total residues modeled: ${ss.total}</div>
+  `;
+}
+
+async function loadGene() {
+  if (!viewer) { setStatus("Viewer not ready yet, try again in a second.", true); return; }
+  const input = document.getElementById("geneInput");
+  const rawInput = input.value.trim();
+  if (!rawInput) {
+    setStatus("Enter a gene symbol first.", true);
+    input.focus();
+    return;
+  }
+
+  const gene = rawInput.toUpperCase().replace(/\s+/g, "");
+  if (!/^[A-Z0-9.-]+$/.test(gene)) {
+    setStatus("Enter a valid gene symbol.", true);
+    return;
+  }
+
+  if (activeController) activeController.abort();
+  activeController = new AbortController();
+  const signal = activeController.signal;
+  const requestId = ++requestSequence;
+  currentGeneName = gene;
+  setLoading(true);
+  resetResultPanels();
+  setStatus(`Searching ${gene}…`, false, true);
+
+  try {
+    const protein = await fetchUniprotAccession(gene, "+AND+organism_id:9606", signal);
+    if (!isCurrentRequest(requestId)) return;
+    if (!protein) {
+      setStatus(`No reviewed UniProt entry found for ${gene}.`, true);
+      return;
+    }
+
+    const accession = protein.primaryAccession;
+    const proteinName = protein.proteinDescription?.recommendedName?.fullName?.value || "Unknown";
+    const length = protein.sequence?.length || 0;
+    const mass = protein.sequence?.molWeight ? (protein.sequence.molWeight / 1000).toFixed(1) + " kDa" : "-";
+    const functionText = cleanText(protein.comments?.find(c => c.commentType === "FUNCTION")?.texts?.[0]?.value) || "No function summary available.";
+    const diseaseText = cleanText(protein.comments?.find(c => c.commentType === "DISEASE")?.disease?.description) || "No disease association listed.";
+    const synonyms = (protein.genes?.[0]?.synonyms || []).map(s => s.value);
+    const aliases = synonyms.length ? synonyms.join(", ") : "No known aliases listed.";
+    const subcellLocs = (protein.comments?.find(c => c.commentType === "SUBCELLULAR_LOCATION")?.subcellularLocations || [])
+      .map(l => l.location?.value).filter(Boolean);
+    const subcellText = subcellLocs.length ? subcellLocs.join(", ") : "Not annotated.";
+
+    setStatus(`Fetching structure for ${accession}…`, false, true);
+    const pdbData = await fetchAlphaFoldStructure(accession, signal);
+    if (!isCurrentRequest(requestId)) return;
+    if (!pdbData) {
+      setStatus(`No AlphaFold structure available for ${accession}.`, true);
+      return;
+    }
+
+    currentPdbData = pdbData;
+    viewer.clear();
+    model = viewer.addModel(pdbData, "pdb");
+    applyColoring();
+    viewer.zoomTo();
+    viewer.render();
+
+    viewer.setClickable({}, true, atom => {
+      if (!atom) return;
+      const confidence = atom.b != null ? Number(atom.b).toFixed(1) : "-";
+      document.getElementById("residueBar").innerHTML =
+        `<strong>${escapeHtml(atom.resn)} ${escapeHtml(atom.resi)}</strong> · chain ${escapeHtml(atom.chain || "-")} · confidence (pLDDT): ${confidence}`;
+    });
+
+    const ss = computeSecondaryStructureStats();
+    lastSS = ss;
+
+    // The core result is usable even if enrichment APIs fail.
+    let refsHtml = "No linked publications found.";
+    let geneId = "-";
+    setStatus("Loading annotations and references…", false, true);
+
+    try {
+      const fullKey = cacheKey("uniprot-full", accession);
+      let fullData = cacheGet(fullKey);
+      if (!fullData) {
+        const fullRes = await apiFetch(`https://rest.uniprot.org/uniprotkb/${accession}.json`, {}, { signal });
+        fullData = await fullRes.json();
+        cacheSet(fullKey, fullData);
+      }
+      geneId = (fullData.uniProtKBCrossReferences || []).find(x => x.database === "GeneID")?.id || "-";
+      const refs = (fullData.references || []).slice(0, 12).map(r => {
+        const pmid = (r.citationCrossReferences || []).find(x => x.database === "PubMed")?.id;
+        const title = escapeHtml(r.citation?.title || "Untitled");
+        const journal = escapeHtml(r.citation?.journal || "");
+        const year = escapeHtml(r.citation?.publicationDate || "");
+        const titleHtml = pmid
+          ? `<a class="ref-title-link" href="https://pubmed.ncbi.nlm.nih.gov/${pmid}/" target="_blank" rel="noopener">${title}</a>`
+          : `<span class="ref-title-link" style="color:var(--text);">${title}</span>`;
+        const linkLine = pmid ? `<a href="https://pubmed.ncbi.nlm.nih.gov/${pmid}/" target="_blank" rel="noopener">PMID:${pmid} →</a>` : "";
+        return `<div class="ref-item">${titleHtml}<div class="ref-meta">${journal} ${year}</div>${linkLine}</div>`;
+      });
+      if (refs.length) refsHtml = refs.join("");
+    } catch (e) {
+      if (e.name === "AbortError") throw e;
+      console.error("Reference enrichment failed:", e);
+      refsHtml = `<div class="error-note">References temporarily unavailable. The structure and core annotation loaded successfully.</div>`;
+    }
+
+    if (!isCurrentRequest(requestId)) return;
+
+    try {
+      const interProEntries = await fetchInterProAnnotations(accession, signal);
+      if (isCurrentRequest(requestId)) renderInterPro(interProEntries, length);
+    } catch (e) {
+      if (e.name === "AbortError") throw e;
+      console.error("InterPro enrichment failed:", e);
+      const section = document.getElementById("interproSection");
+      section.hidden = false;
+      document.getElementById("interproMeta").textContent = "InterPro annotations are temporarily unavailable.";
+      document.getElementById("domainMap").innerHTML = "";
+      document.getElementById("domainScale").innerHTML = "";
+      document.getElementById("interproList").innerHTML = `<div class="error-note">Couldn't load InterPro annotations. The structure and other gene information are still available.</div>`;
+      document.getElementById("interproHint").textContent = "Retry the search later to fetch InterPro domains and features.";
+    }
+
+    if (!isCurrentRequest(requestId)) return;
+
+    try {
+      const loc = await fetchGenomicLocation(geneId, signal);
+      if (isCurrentRequest(requestId)) renderIdeogram(loc, gene, geneId);
+    } catch (e) {
+      if (e.name === "AbortError") throw e;
+      console.error("Genomic location fetch failed:", e);
+      document.getElementById("locationSection").style.display = "block";
+      document.getElementById("ideoContainer").innerHTML = "";
+      document.getElementById("ideoHint").textContent = "Genomic location is temporarily unavailable. The rest of the gene result is still usable.";
+    }
+
+    if (!isCurrentRequest(requestId)) return;
+
+    renderInfo([
+      { label: "Gene", value: `${escapeHtml(gene)} · ${escapeHtml(accession)}`, mono: true },
+      { label: "NCBI Gene ID", value: escapeHtml(geneId), mono: true },
+      { label: "Protein", value: escapeHtml(proteinName) },
+      { label: "Aliases", value: escapeHtml(aliases) },
+      { label: "Subcellular location", value: escapeHtml(subcellText) },
+      { label: "Length / mass", value: `${length} aa · ${escapeHtml(mass)}`, mono: true },
+      { label: "Secondary structure", value: ss ? `${ss.helix}% helix · ${ss.sheet}% sheet · ${ss.coil}% coil · click to expand` : "-", mono: true, collapsible: true, id: "ssField", detail: ssDetailHtml(ss) },
+      { label: "Function", value: escapeHtml(functionText), scroll: true, wide: true },
+      { label: "Disease association", value: escapeHtml(diseaseText), wide: true },
+      { label: "Referenced papers", value: refsHtml, scroll: true, wide: true }
+    ]);
+    renderLearnLinks(gene, accession, geneId);
+    setStatus("Loaded successfully.");
+  } catch (err) {
+    if (err.name === "AbortError") return;
+    console.error(err);
+    setStatus(err.message || "Something went wrong while loading this gene.", true);
+  } finally {
+    if (isCurrentRequest(requestId)) {
+      setLoading(false);
+      activeController = null;
+    }
+  }
+}
+
+function escapeHtml(value) {
+  return String(value ?? "").replace(/[&<>"']/g, ch => ({
+    "&":"&amp;", "<":"&lt;", ">":"&gt;", '"':"&quot;", "'":"&#039;"
+  }[ch]));
 }
 
 function applyColoring() {
   if (!viewer || !model) return;
-  const colorMode = $("colorSelect").value;
-  const styleMode = $("styleSelect").value;
+  const colorMode = document.getElementById("colorSelect").value;
+  const styleMode = document.getElementById("styleSelect").value;
+
   viewer.setStyle({}, {});
 
   let colorSpec;
-  if (colorMode === "confidence") colorSpec = { colorfunc: atom => plddtColor(atom.b) };
+  if (colorMode === "confidence") colorSpec = { colorfunc: (atom) => plddtColor(atom.b) };
   else if (colorMode === "chain") colorSpec = { color: "chain" };
   else if (colorMode === "secondary") colorSpec = { color: "ssPyMOL" };
   else colorSpec = { color: "spectrum" };
 
   if (styleMode === "sphere") {
-    viewer.setStyle({ atom:"CA" }, { sphere:{ ...colorSpec, radius:1.1 } });
+    viewer.setStyle({ atom: "CA" }, { sphere: { ...colorSpec, radius: 1.1 } });
   } else {
-    const styleObject = {};
-    styleObject[styleMode] = colorSpec;
-    viewer.setStyle({}, styleObject);
+    const styleObj = {};
+    styleObj[styleMode] = colorSpec;
+    viewer.setStyle({}, styleObj);
   }
 
-  $("legend-confidence").style.display = colorMode === "confidence" ? "flex" : "none";
-  $("legend-spectrum").style.display = colorMode === "spectrum" ? "flex" : "none";
-  $("legend-secondary").style.display = colorMode === "secondary" ? "flex" : "none";
+  document.getElementById("legend-confidence").style.display = colorMode === "confidence" ? "flex" : "none";
+  document.getElementById("legend-spectrum").style.display = colorMode === "spectrum" ? "flex" : "none";
+  document.getElementById("legend-secondary").style.display = colorMode === "secondary" ? "flex" : "none";
+
   viewer.render();
 }
 
 function toggleSpin() {
-  spinning = $("spinToggle").checked;
+  spinning = document.getElementById("spinToggle").checked;
   if (viewer) viewer.spin(spinning ? "y" : false);
 }
+
 function resetView() { if (viewer && model) { viewer.zoomTo(); viewer.render(); } }
 function zoomIn() { if (viewer && model) { viewer.zoom(1.2, 200); viewer.render(); } }
 function zoomOut() { if (viewer && model) { viewer.zoom(0.8, 200); viewer.render(); } }
 
-function plddtColor(value) {
-  if (value > 90) return "#0053D6";
-  if (value > 70) return "#65CBF3";
-  if (value > 50) return "#FFDB13";
+function plddtColor(b) {
+  if (b > 90) return "#0053D6";
+  if (b > 70) return "#65CBF3";
+  if (b > 50) return "#FFDB13";
   return "#FF7D45";
 }
 
 function downloadPDB() {
-  if (!currentPdbData) {
-    setStatus("No structure is loaded.", true);
-    return;
-  }
-  downloadBlob(new Blob([currentPdbData], { type:"chemical/x-pdb" }), `${currentGeneName || "structure"}.pdb`);
+  if (!currentPdbData) return;
+  const blob = new Blob([currentPdbData], { type: "chemical/x-pdb" });
+  const a = document.createElement("a");
+  a.href = URL.createObjectURL(blob);
+  a.download = `${currentGeneName || "structure"}.pdb`;
+  a.click();
 }
 
 function downloadPNG() {
-  if (!viewer || !model) {
-    setStatus("No structure is loaded.", true);
-    return;
-  }
+  if (!viewer || !model) return;
   const uri = viewer.pngURI();
-  const anchor = document.createElement("a");
-  anchor.href = uri;
-  anchor.download = `${currentGeneName || "structure"}.png`;
-  anchor.click();
-}
-
-function downloadBlob(blob, filename) {
-  const url = URL.createObjectURL(blob);
-  const anchor = document.createElement("a");
-  anchor.href = url;
-  anchor.download = filename;
-  anchor.click();
-  setTimeout(() => URL.revokeObjectURL(url), 1000);
-}
-
-function cleanText(text) {
-  if (!text) return "";
-  return text.replace(/\(PubMed:\d+(,\s*PubMed:\d+)*\)/gi, "")
-    .replace(/\[PubMed:\d+\]/gi, "")
-    .replace(/\s{2,}/g, " ").trim();
-}
-
-function escapeHtml(value) {
-  return String(value ?? "")
-    .replaceAll("&","&amp;").replaceAll("<","&lt;").replaceAll(">","&gt;")
-    .replaceAll('"',"&quot;").replaceAll("'","&#039;");
+  const a = document.createElement("a");
+  a.href = uri;
+  a.download = `${currentGeneName || "structure"}.png`;
+  a.click();
 }

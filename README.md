@@ -69,3 +69,10 @@ Object.keys(localStorage)
 - The reference list is capped at 12 UniProt references.
 - The genomic panel requires a GeneID cross-reference.
 - External API availability and browser CORS/network conditions can still affect results.
+
+
+## InterPro domain annotations
+
+Gene Explorer now queries the InterPro REST API using the resolved UniProt accession. It displays InterPro families, domains, superfamilies, repeats and other classified features with their amino-acid coordinates. The domain map is scaled to the protein length, and InterPro accessions and mapped bars link to the corresponding InterPro entry.
+
+InterPro results are cached in the browser for 24 hours alongside the existing UniProt, AlphaFold and NCBI caches. If InterPro is temporarily unavailable, the core structure result remains usable and the UI reports the enrichment failure without blocking the other stages.
