@@ -16,10 +16,10 @@ Opening `index.html` directly may work in some browsers, but a local HTTP server
 
 ## Files
 
-- `index.html` — page structure and controls.
-- `styles.css` — presentation/styles.
-- `app.js` — API access, caching, rendering, retries, and UI behavior.
-- `test.html` — lightweight manual/browser checks.
+- `index.html` - page structure and controls.
+- `styles.css` - presentation/styles.
+- `app.js` - API access, caching, rendering, retries, and UI behavior.
+- `test.html` - lightweight manual/browser checks.
 
 ## Reliability improvements
 
@@ -44,11 +44,11 @@ Transient network errors, HTTP 429 responses, and HTTP 5xx responses are retried
 
 ## Data sources
 
-- UniProt REST API — protein identity, annotation, disease, subcellular location, and references.
-- AlphaFold DB — predicted protein structure.
-- NCBI E-utilities — genomic location.
-- 3Dmol.js — structure visualization.
-- Ideogram.js — chromosome visualization.
+- UniProt REST API - protein identity, annotation, disease, subcellular location, and references.
+- AlphaFold DB - predicted protein structure.
+- NCBI E-utilities - genomic location.
+- 3Dmol.js - structure visualization.
+- Ideogram.js - chromosome visualization.
 
 All gene searches are restricted to human reviewed (Swiss-Prot) UniProt entries.
 
