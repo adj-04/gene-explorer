@@ -6,8 +6,6 @@ let model = null;
 let spinning = false;
 let currentPdbData = "";
 let currentGeneName = "";
-let lastSS = null;
-let currentIdeogram = null;
 let highlightedDomain = null;
 
 const CACHE_KEY = "gene-explorer-cache-v1";
@@ -124,7 +122,6 @@ function resetResultPanels() {
   document.getElementById("ideoContainer").innerHTML = "";
   document.getElementById("ideoHint").textContent = "";
   document.getElementById("ideoLocText").textContent = "";
-  currentIdeogram = null;
   highlightedDomain = null;
   currentPdbData = "";
   model = null;
@@ -397,7 +394,6 @@ function renderIdeogram(loc, geneSymbol, geneId) {
   const hint = document.getElementById("ideoHint");
   container.innerHTML = "";
   hint.textContent = "";
-  currentIdeogram = null;
 
   if (!loc) {
     section.hidden = true;
@@ -440,7 +436,7 @@ function renderIdeogram(loc, geneSymbol, geneId) {
   }
 
   try {
-    currentIdeogram = new Ideogram({
+    new Ideogram({
       container: "#ideoContainer",
       organism: "human",
       chrHeight: 300,
@@ -622,7 +618,6 @@ async function loadGene() {
     });
 
     const ss = computeSecondaryStructureStats();
-    lastSS = ss;
 
     // The core result is usable even if enrichment APIs fail.
     let refsHtml = "No linked publications found.";
