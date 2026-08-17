@@ -8,6 +8,7 @@ let currentPdbData = "";
 let currentGeneName = "";
 let lastSS = null;
 let currentIdeogram = null;
+let highlightedDomain = null;
 
 const CACHE_KEY = "gene-explorer-cache-v1";
 const CACHE_TTL_MS = 24 * 60 * 60 * 1000;
@@ -95,6 +96,17 @@ function setLoading(loading) {
    "zoomOutButton","zoomInButton","downloadPdbButton","downloadPngButton"]
     .forEach(id => { const el = document.getElementById(id); if (el) el.disabled = loading; });
   document.getElementById("searchButton").textContent = loading ? "Loading…" : "Search";
+  const rail = document.getElementById("progressRail");
+  rail.hidden = !loading;
+  if (loading) setProgress(0);
+}
+
+function setProgress(activeIndex) {
+  const segs = document.querySelectorAll("#progressRail .progress-seg");
+  segs.forEach((seg, i) => {
+    seg.classList.toggle("done", i < activeIndex);
+    seg.classList.toggle("active", i === activeIndex);
+  });
 }
 
 function resetResultPanels() {
@@ -113,6 +125,7 @@ function resetResultPanels() {
   document.getElementById("ideoHint").textContent = "";
   document.getElementById("ideoLocText").textContent = "";
   currentIdeogram = null;
+  highlightedDomain = null;
   currentPdbData = "";
   model = null;
   if (viewer) {
@@ -140,8 +153,8 @@ window.addEventListener("load", () => {
   document.getElementById("geneInput").addEventListener("keydown", e => {
     if (e.key === "Enter" && !e.repeat) loadGene();
   });
-  document.getElementById("styleSelect").addEventListener("change", applyColoring);
-  document.getElementById("colorSelect").addEventListener("change", applyColoring);
+  document.getElementById("styleSelect").addEventListener("change", () => { applyColoring(); reapplyDomainHighlight(); });
+  document.getElementById("colorSelect").addEventListener("change", () => { applyColoring(); reapplyDomainHighlight(); });
   document.getElementById("spinToggle").addEventListener("change", toggleSpin);
   document.getElementById("resetButton").addEventListener("click", resetView);
   document.getElementById("zoomInButton").addEventListener("click", zoomIn);
@@ -287,16 +300,25 @@ function renderInterPro(entries, proteinLength) {
     entry.fragments.forEach(fragment => {
       const left = Math.max(0, Math.min(100, ((fragment.start - 1) / length) * 100));
       const width = Math.max(0.7, Math.min(100 - left, ((fragment.end - fragment.start + 1) / length) * 100));
+      const domainKey = `${entry.accession}:${fragment.start}-${fragment.end}`;
+      const externalUrl = `https://www.ebi.ac.uk/interpro/entry/InterPro/${encodeURIComponent(entry.accession)}/`;
+
       const bar = document.createElement("a");
       bar.className = "domain-bar";
-      bar.href = `https://www.ebi.ac.uk/interpro/entry/InterPro/${encodeURIComponent(entry.accession)}/`;
+      bar.href = externalUrl;
       bar.target = "_blank";
       bar.rel = "noopener";
+      bar.dataset.domainKey = domainKey;
       bar.style.left = `${left}%`;
       bar.style.width = `${width}%`;
       bar.style.background = color;
-      bar.setAttribute("aria-label", `${entry.accession}: ${entry.name}, residues ${fragment.start} to ${fragment.end}`);
+      bar.setAttribute("aria-label", `${entry.accession}: ${entry.name}, residues ${fragment.start} to ${fragment.end}. Click to highlight in the 3D structure.`);
       bar.title = `${entry.accession} · ${entry.name} · residues ${fragment.start}-${fragment.end}`;
+      bar.addEventListener("click", (e) => {
+        if (e.metaKey || e.ctrlKey) return; // let it open externally
+        e.preventDefault();
+        highlightDomain(entry, fragment, bar);
+      });
       track.appendChild(bar);
     });
   });
@@ -327,10 +349,25 @@ function renderInterPro(entries, proteinLength) {
       <div class="interpro-name">${escapeHtml(entry.name)}</div>
       <div class="interpro-range">${escapeHtml(ranges)}</div>
     `;
+    const firstFragment = entry.fragments[0];
+    if (firstFragment) {
+      item.dataset.domainKey = `${entry.accession}:${firstFragment.start}-${firstFragment.end}`;
+      item.classList.add("clickable");
+      item.tabIndex = 0;
+      item.setAttribute("role", "button");
+      item.setAttribute("aria-label", `Highlight ${entry.name} on the 3D structure`);
+      item.addEventListener("click", (e) => {
+        if (e.target.closest("a")) return; // let the accession link navigate normally
+        highlightDomain(entry, firstFragment, item);
+      });
+      item.addEventListener("keydown", (e) => {
+        if (e.key === "Enter" || e.key === " ") { e.preventDefault(); highlightDomain(entry, firstFragment, item); }
+      });
+    }
     list.appendChild(item);
   });
 
-  hint.textContent = "Bars show InterPro sequence coordinates. Click an InterPro accession or bar to open its curated entry.";
+  hint.textContent = "Click a domain bar or card to highlight it on the 3D structure above · ctrl/cmd-click a bar to open its InterPro entry instead.";
 }
 
 async function fetchGenomicLocation(geneId, signal) {
@@ -539,6 +576,7 @@ async function loadGene() {
   setLoading(true);
   resetResultPanels();
   setStatus(`Searching ${gene}…`, false, true);
+  setProgress(0);
 
   try {
     const protein = await fetchUniprotAccession(gene, "+AND+organism_id:9606", signal);
@@ -561,6 +599,7 @@ async function loadGene() {
     const subcellText = subcellLocs.length ? subcellLocs.join(", ") : "Not annotated.";
 
     setStatus(`Fetching structure for ${accession}…`, false, true);
+    setProgress(1);
     const pdbData = await fetchAlphaFoldStructure(accession, signal);
     if (!isCurrentRequest(requestId)) return;
     if (!pdbData) {
@@ -589,6 +628,7 @@ async function loadGene() {
     let refsHtml = "No linked publications found.";
     let geneId = "-";
     setStatus("Loading annotations and references…", false, true);
+    setProgress(2);
 
     try {
       const fullKey = cacheKey("uniprot-full", accession);
@@ -618,6 +658,8 @@ async function loadGene() {
     }
 
     if (!isCurrentRequest(requestId)) return;
+    setProgress(3);
+    setStatus("Loading protein domains and features…", false, true);
 
     try {
       const interProEntries = await fetchInterProAnnotations(accession, signal);
@@ -635,6 +677,8 @@ async function loadGene() {
     }
 
     if (!isCurrentRequest(requestId)) return;
+    setProgress(4);
+    setStatus("Loading genomic location…", false, true);
 
     try {
       const loc = await fetchGenomicLocation(geneId, signal);
@@ -662,6 +706,7 @@ async function loadGene() {
       { label: "Referenced papers", value: refsHtml, scroll: true, wide: true }
     ]);
     renderLearnLinks(gene, accession, geneId);
+    setProgress(5);
     setStatus("Loaded successfully.");
   } catch (err) {
     if (err.name === "AbortError") return;
@@ -707,6 +752,45 @@ function applyColoring() {
   document.getElementById("legend-secondary").style.display = colorMode === "secondary" ? "flex" : "none";
 
   viewer.render();
+}
+
+function reapplyDomainHighlight() {
+  if (!viewer || !model || !highlightedDomain) return;
+  const sel = { resi: `${highlightedDomain.start}-${highlightedDomain.end}` };
+  viewer.addStyle(sel, { stick: { color: "#ff4d4d", radius: 0.35 } });
+  viewer.addStyle(sel, { cartoon: { color: "#ff4d4d", thickness: 0.6 } });
+  viewer.render();
+}
+
+function highlightDomain(entry, fragment, sourceEl) {
+  if (!viewer || !model) return;
+
+  document.querySelectorAll(".domain-bar.active, .interpro-item.active").forEach(el => el.classList.remove("active"));
+
+  const isSame = highlightedDomain
+    && highlightedDomain.accession === entry.accession
+    && highlightedDomain.start === fragment.start
+    && highlightedDomain.end === fragment.end;
+
+  applyColoring(); // clears any previous highlight overlay, reapplies base style
+
+  if (isSame) {
+    highlightedDomain = null;
+    document.getElementById("residueBar").textContent = "Click any residue in the structure to inspect it.";
+    return;
+  }
+
+  highlightedDomain = { accession: entry.accession, start: fragment.start, end: fragment.end };
+  reapplyDomainHighlight();
+
+  document.querySelectorAll(`[data-domain-key="${entry.accession}:${fragment.start}-${fragment.end}"]`)
+    .forEach(el => el.classList.add("active"));
+
+  document.getElementById("residueBar").innerHTML =
+    `<strong>${escapeHtml(entry.name)}</strong> · ${escapeHtml(entry.accession)} · ` +
+    `residues ${fragment.start}-${fragment.end} highlighted in red on the structure above · click again to clear`;
+
+  document.getElementById("viewer")?.scrollIntoView({ behavior: "smooth", block: "center" });
 }
 
 function toggleSpin() {
