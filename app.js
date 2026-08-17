@@ -6,6 +6,7 @@ let model = null;
 let spinning = false;
 let currentPdbData = "";
 let currentGeneName = "";
+let currentProteinLength = 0;
 let highlightedDomain = null;
 
 const CACHE_KEY = "gene-explorer-cache-v1";
@@ -123,6 +124,7 @@ function resetResultPanels() {
   document.getElementById("ideoHint").textContent = "";
   document.getElementById("ideoLocText").textContent = "";
   highlightedDomain = null;
+  currentProteinLength = 0;
   currentPdbData = "";
   model = null;
   if (viewer) {
@@ -585,6 +587,7 @@ async function loadGene() {
     const accession = protein.primaryAccession;
     const proteinName = protein.proteinDescription?.recommendedName?.fullName?.value || "Unknown";
     const length = protein.sequence?.length || 0;
+    currentProteinLength = length;
     const mass = protein.sequence?.molWeight ? (protein.sequence.molWeight / 1000).toFixed(1) + " kDa" : "-";
     const functionText = cleanText(protein.comments?.find(c => c.commentType === "FUNCTION")?.texts?.[0]?.value) || "No function summary available.";
     const diseaseText = cleanText(protein.comments?.find(c => c.commentType === "DISEASE")?.disease?.description) || "No disease association listed.";
@@ -752,8 +755,19 @@ function applyColoring() {
 function reapplyDomainHighlight() {
   if (!viewer || !model || !highlightedDomain) return;
   const sel = { resi: `${highlightedDomain.start}-${highlightedDomain.end}` };
-  viewer.addStyle(sel, { stick: { color: "#ff4d4d", radius: 0.35 } });
-  viewer.addStyle(sel, { cartoon: { color: "#ff4d4d", thickness: 0.6 } });
+  const styleMode = document.getElementById("styleSelect").value;
+  const HL = "#ff4d4d";
+
+  // Recolor the selection *within* the current representation rather than
+  // adding a second one on top. Stacking sticks over cartoon made whole-protein
+  // family entries (e.g. a 450-residue span) render as an unreadable red blob.
+  if (styleMode === "sphere") {
+    viewer.setStyle({ ...sel, atom: "CA" }, { sphere: { color: HL, radius: 1.3 } });
+  } else if (styleMode === "stick") {
+    viewer.setStyle(sel, { stick: { color: HL, radius: 0.3 } });
+  } else {
+    viewer.setStyle(sel, { cartoon: { color: HL, thickness: 1.0 } });
+  }
   viewer.render();
 }
 
@@ -781,9 +795,15 @@ function highlightDomain(entry, fragment, sourceEl) {
   document.querySelectorAll(`[data-domain-key="${entry.accession}:${fragment.start}-${fragment.end}"]`)
     .forEach(el => el.classList.add("active"));
 
+  const span = fragment.end - fragment.start + 1;
+  const total = Number(currentProteinLength) || 0;
+  const coversMost = total > 0 && span / total > 0.8;
+
   document.getElementById("residueBar").innerHTML =
     `<strong>${escapeHtml(entry.name)}</strong> · ${escapeHtml(entry.accession)} · ` +
-    `residues ${fragment.start}-${fragment.end} highlighted in red on the structure above · click again to clear`;
+    `residues ${fragment.start}-${fragment.end} highlighted in red` +
+    (coversMost ? ` · note: this entry spans ~${Math.round((span / total) * 100)}% of the protein` : "") +
+    ` · click again to clear`;
 
   document.getElementById("viewer")?.scrollIntoView({ behavior: "smooth", block: "center" });
 }
