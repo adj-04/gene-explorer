@@ -1,0 +1,29 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Gene Explorer — smoke tests</title>
+<style>
+body{font-family:system-ui,sans-serif;max-width:900px;margin:40px auto;padding:0 20px;background:#111;color:#eee}
+li{margin:.7rem 0}.pass{color:#8fcf8f}.note{color:#e8a94a}
+code{background:#222;padding:2px 5px;border-radius:3px}
+</style>
+</head>
+<body>
+<h1>Gene Explorer smoke tests</h1>
+<p class="note">These are manual browser checks rather than a test framework.</p>
+<ol>
+<li>Open <code>index.html</code> through a local HTTP server.</li>
+<li>Search <code>TP53</code>. Confirm the structure, annotation cards, references and genomic panel load.</li>
+<li>Search <code>TP53</code> again. The status should say it was loaded from local cache and should be noticeably faster.</li>
+<li>Press Enter in the gene field. Confirm it triggers one search and the controls lock while loading.</li>
+<li>Click Search repeatedly while loading. Confirm no duplicate requests/results appear.</li>
+<li>Try an invalid gene such as <code>THIS_IS_NOT_A_GENE</code>. Confirm the previous result is cleared and an error is shown.</li>
+<li>Temporarily block UniProt/AlphaFold in browser developer tools and confirm the UI reports the failure without leaving stale panels visible.</li>
+<li>Temporarily block NCBI or Ideogram. Confirm the structure remains usable and the genomic stage reports a warning.</li>
+<li>Use Tab/Enter/Space on the secondary-structure heading and on the zoom controls.</li>
+<li>Click a residue and confirm the residue bar updates and receives focus.</li>
+</ol>
+</body>
+</html>

@@ -1,73 +1,71 @@
 # Gene Structure Explorer
 
-A single-file, browser-based tool for looking up any human gene and getting its
-predicted 3D protein structure, genomic location, key annotation, and linked
-literature — all in one view.
+A browser-based tool for exploring human genes through UniProt, AlphaFold DB, NCBI Gene, 3Dmol.js, and Ideogram.js.
 
-## What it does
+## Run locally
 
-Type in a gene symbol (e.g. `TP53`, `INS`, `HBB`, `CTCF`, `PLAGL2`) and the
-app will:
+No build step is required.
 
-1. Look up the reviewed UniProt entry for that gene (restricted to human).
-2. Pull the AlphaFold DB structure prediction for the matching accession.
-3. Render it in an interactive 3Dmol.js viewer.
-4. Surface annotation: protein name, aliases, subcellular location,
-   length/mass, secondary structure composition, function summary, and
-   disease associations.
-5. Look up the gene's chromosome, cytogenetic band, and coordinates, and
-   render its position on a full human karyotype.
-6. Pull the linked PubMed references from UniProt.
-7. Link out to related resources for deeper reading.
+```bash
+python3 -m http.server 8000
+```
 
-## Features
+Then open `http://localhost:8000`.
 
-- **Structure viewer** — drag to rotate, scroll to zoom, click any residue to
-  see its identity, chain, and pLDDT confidence score.
-- **Style controls** — cartoon, sphere (backbone), or stick rendering.
-- **Color modes** — pLDDT confidence, secondary structure, chain, or
-  N→C spectrum, each with its own legend.
-- **Auto-rotate** toggle and manual zoom/reset controls.
-- **Collapsible secondary structure panel** — click the label to expand a
-  helix/sheet/coil breakdown with percentage bars and residue counts.
-- **Genomic location panel** — full human karyotype (Ideogram.js) with the
-  searched gene's chromosome highlighted in red; click the highlight to open
-  the gene's NCBI record.
-- **Download** the raw PDB file or a PNG snapshot of the current view.
-- **Read more** — quick links to UniProt, AlphaFold DB, NCBI Gene, GeneCards,
-  RCSB PDB, PubMed, Ensembl, and STRING for the searched gene.
-
-## Data sources
-
-| Source | Used for |
-| --- | --- |
-| [UniProt REST API](https://www.uniprot.org/help/api) | Protein identity, function, disease, subcellular location, references |
-| [AlphaFold DB API](https://alphafold.ebi.ac.uk/api-docs) | Predicted structure (PDB file) |
-| [NCBI E-utilities](https://www.ncbi.nlm.nih.gov/books/NBK25501/) | Chromosome, cytogenetic band, and genomic coordinates |
-| [3Dmol.js](https://3dmol.csb.pitt.edu/) | In-browser structure rendering |
-| [Ideogram.js](https://eweitz.github.io/ideogram/) | In-browser chromosome/karyotype rendering |
-
-All lookups are restricted to human (`organism_id:9606`), reviewed
-(Swiss-Prot) UniProt entries only.
+Opening `index.html` directly may work in some browsers, but a local HTTP server is recommended because the app uses ES modules and remote APIs.
 
 ## Files
 
-- `index.html` — the entire app (HTML, CSS, and JS in one file). Just open it
-  in a browser; no build step or server required.
+- `index.html` — page structure and controls.
+- `styles.css` — presentation/styles.
+- `app.js` — API access, caching, rendering, retries, and UI behavior.
+- `test.html` — lightweight manual/browser checks.
+
+## Reliability improvements
+
+### Client-side caching
+Gene lookups are cached in both an in-memory `Map` and `localStorage` for 24 hours. The cache is keyed by normalized gene symbol. If browser storage quota is exceeded, the app continues with the in-memory cache.
+
+### Request lockout and stale-request protection
+The Search button and gene input are disabled while a lookup is running. A new request also aborts the previous `fetch` chain. A request ID prevents late results from an older search from overwriting a newer result.
+
+### Independent async stages
+UniProt/AlphaFold are required for the main result. References and genomic location are separate stages, so a failure in one does not discard a successfully loaded structure.
+
+### Retry/backoff
+Transient network errors, HTTP 429 responses, and HTTP 5xx responses are retried up to three times with exponential backoff. `Retry-After` is respected when supplied.
+
+### Accessibility
+- Search and control elements use real event listeners instead of inline `onclick`/`onchange`.
+- Zoom buttons have accessible labels.
+- Keyboard activation is supported for the secondary-structure disclosure.
+- Residue information is exposed through a live region.
+- The Ideogram annotation gets keyboard access when the library renders the annotation element.
+
+## Data sources
+
+- UniProt REST API — protein identity, annotation, disease, subcellular location, and references.
+- AlphaFold DB — predicted protein structure.
+- NCBI E-utilities — genomic location.
+- 3Dmol.js — structure visualization.
+- Ideogram.js — chromosome visualization.
+
+All gene searches are restricted to human reviewed (Swiss-Prot) UniProt entries.
+
+## Cache
+
+The current cache lifetime is 24 hours. Cached entries use the key prefix `gene-explorer:v2:`. To clear them from the browser console:
+
+```js
+Object.keys(localStorage)
+  .filter(key => key.startsWith("gene-explorer:v2:"))
+  .forEach(key => localStorage.removeItem(key));
+```
 
 ## Known limitations
 
-- Only genes with a reviewed human UniProt entry and an existing AlphaFold
-  prediction will resolve.
-- Secondary structure percentages are computed from the AlphaFold model's own
-  per-residue `ss` assignment, not an independent DSSP run.
-- Reference list is capped at the first 12 entries UniProt returns.
-- The genomic location panel requires the gene to have an NCBI GeneID
-  cross-reference in UniProt; a small number of entries lack one.
-
-## Ideas for later
-
-- Cache recent gene lookups client-side to cut down repeat API calls.
-- Add a sequence view alongside the 3D structure.
-- Surface known structural domains/motifs (e.g. from InterPro) as selectable
-  highlights on the model.
+- Only genes with a reviewed human UniProt entry and an AlphaFold prediction can display a structure.
+- Secondary-structure percentages come from the AlphaFold model's per-residue assignment.
+- The reference list is capped at 12 UniProt references.
+- The genomic panel requires a GeneID cross-reference.
+- External API availability and browser CORS/network conditions can still affect results.
