@@ -7,6 +7,7 @@ let spinning = false;
 let currentPdbData = "";
 let currentGeneName = "";
 let lastSS = null;
+let currentIdeogram = null;
 
 const CACHE_KEY = "gene-explorer-cache-v1";
 const CACHE_TTL_MS = 24 * 60 * 60 * 1000;
