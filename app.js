@@ -298,13 +298,6 @@ function renderInterPro(entries, proteinLength) {
       bar.setAttribute("aria-label", `${entry.accession}: ${entry.name}, residues ${fragment.start} to ${fragment.end}`);
       bar.title = `${entry.accession} · ${entry.name} · residues ${fragment.start}-${fragment.end}`;
       track.appendChild(bar);
-
-      const label = document.createElement("span");
-      label.className = "domain-label";
-      label.style.left = `${Math.min(98, Math.max(2, left + width / 2))}%`;
-      label.textContent = entry.name;
-      label.title = `${entry.name} (${fragment.start}-${fragment.end})`;
-      track.appendChild(label);
     });
   });
 
