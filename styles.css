@@ -373,20 +373,6 @@
   .helix-legend[hidden] { display: none; }
   @media (max-width: 1340px) { .helix { display: none; } }
   .domain-map.helix-linked { cursor: crosshair; }
-  .helix-nav {
-    position: absolute; left: calc(100% + 6px); top: 50%; transform: translateY(-50%);
-    display: flex; flex-direction: column; gap: 6px;
-  }
-  .helix-btn {
-    width: 22px; height: 22px; padding: 0; border-radius: 50%;
-    display: inline-flex; align-items: center; justify-content: center;
-    background: var(--panel); color: var(--text-dim); border: 1px solid var(--border);
-    font-size: 0.55rem; font-weight: 500; line-height: 1; touch-action: none;
-    transition: border-color 0.15s, color 0.15s, box-shadow 0.15s;
-  }
-  .helix-btn:hover:not(:disabled) { background: var(--panel); border-color: var(--accent); color: var(--accent); box-shadow: 0 0 10px rgba(232, 169, 74, 0.25); }
-  .helix-btn[hidden] { display: none; }
-  .helix-btn:disabled, .helix-btn:disabled:hover { background: var(--panel); color: var(--text-dim); border-color: var(--border); box-shadow: none; opacity: 0.35; }
   .helix-end {
     position: absolute; left: 50%; transform: translateX(-50%); white-space: nowrap;
     font-family: 'JetBrains Mono', monospace; font-size: 0.58rem; letter-spacing: 0.12em; text-transform: uppercase;
@@ -396,27 +382,43 @@
   .helix-end-top { top: -1.3rem; }
   .helix-end-bottom { top: calc(100% + 6px); }
 
-  /* "See it on the structure" / "Back to where you were" chip + rail marker */
-  .return-chip {
-    position: fixed; left: 50%; bottom: 22px; transform: translateX(-50%); z-index: 40;
-    background: var(--panel); color: var(--text); border: 1px solid var(--accent); border-radius: 999px;
-    padding: 0.5rem 1rem; font-family: 'JetBrains Mono', monospace; font-weight: 500; font-size: 0.72rem;
-    letter-spacing: 0.06em; box-shadow: 0 8px 26px rgba(0, 0, 0, 0.55), 0 0 14px rgba(232, 169, 74, 0.18);
+  /* Helix slider: whole coding sequence, 5′ (top) → 3′ (bottom) */
+  .helix-slider {
+    position: absolute; top: 0; left: calc(100% + 8px); width: 14px; height: 100%;
+    cursor: pointer; touch-action: none; outline: none;
   }
-  .return-chip:hover { background: var(--panel); color: var(--accent); }
-  .return-chip[hidden] { display: none; }
-  .return-chip.in { animation: chip-in 0.3s cubic-bezier(0.2, 0.8, 0.2, 1); }
-  @keyframes chip-in { from { opacity: 0; transform: translate(-50%, 10px); } to { opacity: 1; transform: translate(-50%, 0); } }
-  .jr-here { position: absolute; left: 3px; width: 10px; height: 10px; margin-top: -5px; pointer-events: none; }
-  .jr-here::before {
-    content: ""; position: absolute; inset: 0; background: var(--accent); transform: rotate(45deg); border-radius: 2px;
-    animation: here-pulse 1.6s ease-in-out infinite;
+  .helix-slider[hidden] { display: none; }
+  .hs-track {
+    position: absolute; left: 6px; top: 0; bottom: 0; width: 2px; border-radius: 1px; background: var(--border);
   }
-  .jr-here[hidden] { display: none; }
-  .jr-here span {
-    position: absolute; right: 18px; top: 50%; transform: translateY(-50%);
-    white-space: nowrap; font-family: 'JetBrains Mono', monospace; font-size: 0.58rem; letter-spacing: 0.1em;
-    text-transform: uppercase; color: var(--accent); background: var(--bg); padding: 0.1rem 0.35rem; border-radius: 3px;
+  .hs-marks { position: absolute; inset: 0; pointer-events: none; }
+  .hs-domain { position: absolute; left: 5px; width: 4px; border-radius: 2px; background: rgba(232, 169, 74, 0.45); }
+  .hs-variant { position: absolute; left: 3px; width: 8px; height: 1.5px; margin-top: -0.75px; background: #e07a5f; opacity: 0.8; }
+  .hs-thumb {
+    position: absolute; left: 1px; width: 12px; min-height: 12px; border-radius: 6px;
+    border: 1px solid rgba(232, 169, 74, 0.7); background: rgba(232, 169, 74, 0.12);
+    box-shadow: 0 0 10px rgba(232, 169, 74, 0.2); cursor: grab;
+    transition: border-color 0.2s, background 0.2s, box-shadow 0.2s;
   }
-  @keyframes here-pulse { 0%, 100% { box-shadow: 0 0 6px rgba(232, 169, 74, 0.4); } 50% { box-shadow: 0 0 14px rgba(232, 169, 74, 0.85); } }
-  @media (prefers-reduced-motion: reduce) { .return-chip.in, .jr-here::before { animation: none; } }
+  .helix-slider:hover .hs-thumb, .helix-slider:focus-visible .hs-thumb {
+    border-color: var(--accent); background: rgba(232, 169, 74, 0.2); box-shadow: 0 0 14px rgba(232, 169, 74, 0.35);
+  }
+  .helix-slider.dragging .hs-thumb { cursor: grabbing; background: rgba(232, 169, 74, 0.28); }
+  .hs-pin {
+    position: absolute; left: 1px; width: 12px; height: 12px; margin-top: -6px; padding: 0;
+    background: transparent; border: none; cursor: pointer;
+  }
+  .hs-pin::before {
+    content: ""; position: absolute; inset: 1px; background: #ffd68c; transform: rotate(45deg); border-radius: 2px;
+    box-shadow: 0 0 8px rgba(255, 214, 140, 0.7); animation: pin-pulse 1.6s ease-in-out infinite;
+  }
+  .hs-pin:hover { background: transparent; }
+  .hs-pin[hidden] { display: none; }
+  .hs-pin span {
+    position: absolute; left: 18px; top: 50%; transform: translateY(-50%); white-space: nowrap; pointer-events: none;
+    font-family: 'JetBrains Mono', monospace; font-size: 0.56rem; letter-spacing: 0.08em; text-transform: uppercase;
+    color: #ffd68c; background: var(--bg); padding: 0.1rem 0.35rem; border-radius: 3px; opacity: 0; transition: opacity 0.2s;
+  }
+  .hs-pin:hover span, .hs-pin:focus-visible span { opacity: 1; }
+  @keyframes pin-pulse { 0%, 100% { opacity: 0.7; } 50% { opacity: 1; } }
+  @media (prefers-reduced-motion: reduce) { .hs-pin::before { animation: none; } }
