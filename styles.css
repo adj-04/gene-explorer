@@ -231,6 +231,7 @@
   .extra-section { margin-top: 2.5rem; border-top: 1px solid var(--border); padding-top: 1.5rem; }
   .chip-row { display: flex; flex-wrap: wrap; gap: 0.5rem; }
   .gene-chip {
+    display: inline-flex; align-items: center; text-decoration: none;
     background: transparent; color: var(--text-dim); border: 1px solid var(--border);
     font-family: 'JetBrains Mono', monospace; font-weight: 500; font-size: 0.75rem;
     padding: 0.3rem 0.65rem; border-radius: 4px; cursor: pointer;
@@ -243,6 +244,7 @@
   }
   .variant-tick:hover, .variant-tick:focus { opacity: 1; outline: 2px solid var(--accent); outline-offset: 1px; }
   .variant-tick.active { background: #ff4d4d; box-shadow: 0 0 0 2px #ff4d4d; opacity: 1; }
+  .variant-more { margin-top: 0.8rem; }
   .expr-row { margin-bottom: 0.6rem; }
   .expr-label { font-family: 'JetBrains Mono', monospace; font-size: 0.72rem; color: var(--text-dim); margin-bottom: 0.25rem; }
   .ext-link { color: var(--accent); text-decoration: none; }
