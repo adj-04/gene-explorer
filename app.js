@@ -784,6 +784,8 @@ function highlightDomain(entry, fragment, sourceEl) {
   if (isSame) {
     highlightedDomain = null;
     document.getElementById("residueBar").textContent = "Click any residue in the structure to inspect it.";
+    viewer.zoomTo({}, 600); // fly back out to the whole protein
+    viewer.render();
     return;
   }
 
@@ -802,6 +804,10 @@ function highlightDomain(entry, fragment, sourceEl) {
     `residues ${fragment.start}-${fragment.end} in color, rest greyed out` +
     (coversMost ? ` · note: this entry spans ~${Math.round((span / total) * 100)}% of the protein` : "") +
     ` · click again to clear`;
+
+  // Fly the camera to the highlighted residues
+  viewer.zoomTo({ resi: `${fragment.start}-${fragment.end}` }, 600);
+  viewer.render();
 
   document.getElementById("viewer")?.scrollIntoView({ behavior: "smooth", block: "center" });
 }
