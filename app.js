@@ -9,8 +9,9 @@ let currentProteinLength = 0;
 let highlightedDomain = null;
 
 const RECENT_KEY = "gene-explorer-recent";
-const MAX_RECENT = 6;
+const MAX_RECENT = 3;
 const MAX_VARIANT_CARDS = 60;
+const VARIANTS_COLLAPSED = 6;
 
 const CACHE_KEY = "gene-explorer-cache-v1";
 const CACHE_TTL_MS = 24 * 60 * 60 * 1000;
@@ -170,13 +171,12 @@ window.addEventListener("load", () => {
     if (toggle) toggleCollapsible(toggle.dataset.target);
   });
 
-  // Recent-search chips and interaction-partner chips both load a gene on click
-  ["recentRow", "partnerList"].forEach(id => {
-    document.getElementById(id)?.addEventListener("click", e => {
-      const chip = e.target.closest(".gene-chip");
-      if (chip?.dataset.gene) searchGene(chip.dataset.gene);
-    });
+  // Recent-search chips load a gene on click (partner chips open a new tab instead)
+  document.getElementById("recentRow")?.addEventListener("click", e => {
+    const chip = e.target.closest(".gene-chip");
+    if (chip?.dataset.gene) searchGene(chip.dataset.gene);
   });
+  document.getElementById("variantMore")?.addEventListener("click", toggleVariantCards);
   renderRecent();
 
   // Shareable links: ?gene=FMR1 loads that gene straight away
@@ -935,6 +935,8 @@ function resetExtraSections() {
     const el = document.getElementById(id);
     if (el) el.innerHTML = "";
   });
+  const more = document.getElementById("variantMore");
+  if (more) { more.hidden = true; more.dataset.expanded = "false"; }
 }
 
 function loadExtras(gene, accession, length, requestId, signal) {
@@ -1077,9 +1079,11 @@ function renderVariants(variants, proteinLength) {
   const s2 = document.createElement("span"); s2.textContent = `${length} aa`;
   scale.append(s1, s2);
 
-  variants.slice(0, MAX_VARIANT_CARDS).forEach(v => {
+  const cards = variants.slice(0, MAX_VARIANT_CARDS);
+  cards.forEach((v, i) => {
     const item = document.createElement("div");
-    item.className = "interpro-item clickable";
+    item.className = "interpro-item clickable" + (i >= VARIANTS_COLLAPSED ? " variant-extra" : "");
+    item.hidden = i >= VARIANTS_COLLAPSED;
     item.tabIndex = 0;
     item.setAttribute("role", "button");
     item.dataset.domainKey = `VAR-${v.pos}-${v.wt}-${v.mt}:${v.pos}-${v.pos}`;
@@ -1104,9 +1108,28 @@ function renderVariants(variants, proteinLength) {
     list.appendChild(item);
   });
 
+  const more = document.getElementById("variantMore");
+  if (more) {
+    more.hidden = cards.length <= VARIANTS_COLLAPSED;
+    more.dataset.expanded = "false";
+    more.dataset.count = String(cards.length);
+    more.textContent = `See more (${cards.length - VARIANTS_COLLAPSED} more)`;
+  }
+
   hint.textContent = (variants.length > MAX_VARIANT_CARDS
-    ? `Showing the first ${MAX_VARIANT_CARDS} of ${variants.length} by position · every variant is marked on the track · `
+    ? `Cards list the first ${MAX_VARIANT_CARDS} of ${variants.length} by position · every variant is marked on the track · `
     : "") + "Click a tick or card to show that residue on the 3D structure.";
+}
+
+function toggleVariantCards() {
+  const more = document.getElementById("variantMore");
+  if (!more) return;
+  const expand = more.dataset.expanded !== "true";
+  document.querySelectorAll("#variantList .variant-extra").forEach(el => { el.hidden = !expand; });
+  more.dataset.expanded = String(expand);
+  const hiddenCount = Number(more.dataset.count || 0) - VARIANTS_COLLAPSED;
+  more.textContent = expand ? "See less" : `See more (${hiddenCount} more)`;
+  if (!expand) document.getElementById("variantSection")?.scrollIntoView({ behavior: "smooth", block: "start" });
 }
 
 /* ---- Interaction partners (STRING) ---- */
@@ -1139,10 +1162,11 @@ function renderPartners(partners) {
     meta.textContent = "No interaction partners found in STRING for this gene.";
     return;
   }
-  meta.textContent = "Top functional partners from STRING (combined score 0–1) · click one to explore it";
+  meta.textContent = "Top functional partners from STRING (combined score 0–1) · click one to open it in a new tab";
+  const base = window.location.pathname;
   list.innerHTML = partners.map(p =>
-    `<button type="button" class="gene-chip" data-gene="${escapeHtml(p.name)}" title="STRING combined score ${p.score.toFixed(3)}">` +
-    `${escapeHtml(p.name)}<span class="chip-score">${p.score.toFixed(2)}</span></button>`
+    `<a class="gene-chip" href="${base}?gene=${encodeURIComponent(p.name)}" target="_blank" rel="noopener" title="STRING combined score ${p.score.toFixed(3)}">` +
+    `${escapeHtml(p.name)}<span class="chip-score">${p.score.toFixed(2)}</span></a>`
   ).join("");
 }
 
