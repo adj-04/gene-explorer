@@ -8,7 +8,7 @@ let currentGeneName = "";
 let currentProteinLength = 0;
 let highlightedDomain = null;
 
-const helixData = { gene: "", length: 0, domains: [], variants: [], cds: "", transcript: "", cdsMatches: null };
+const helixData = { gene: "", length: 0, domains: [], variants: [], cds: "", transcript: "", cdsMatches: null, cdsState: "" };
 let requestHelixDraw = () => {};
 
 const RECENT_KEY = "gene-explorer-recent";
@@ -131,7 +131,7 @@ function resetResultPanels() {
   document.getElementById("ideoHint").textContent = "";
   document.getElementById("ideoLocText").textContent = "";
   resetExtraSections();
-  Object.assign(helixData, { gene: "", length: 0, domains: [], variants: [], cds: "", transcript: "", cdsMatches: null });
+  Object.assign(helixData, { gene: "", length: 0, domains: [], variants: [], cds: "", transcript: "", cdsMatches: null, cdsState: "" });
   requestHelixDraw();
   highlightedDomain = null;
   currentProteinLength = 0;
@@ -1616,6 +1616,13 @@ function pickEnsemblTranscript(fullData, accession) {
 }
 
 async function loadCds(gene, accession, fullData, requestId, signal) {
+  const fail = (why) => {
+    if (!isCurrentRequest(requestId)) return;
+    helixData.cdsState = "failed";
+    console.warn(`Coding sequence unavailable for ${gene}:`, why);
+    requestHelixDraw();
+  };
+  helixData.cdsState = "loading";
   try {
     const key = cacheKey("cds", accession);
     let rec = cacheGet(key);
@@ -1629,13 +1636,13 @@ async function loadCds(gene, accession, fullData, requestId, signal) {
         tid = (await res.json()).canonical_transcript || "";
       }
       tid = tid.split(".")[0];
-      if (!tid) return;
+      if (!tid) { fail("no Ensembl transcript found"); return; }
       const res = await apiFetch(
         `https://rest.ensembl.org/sequence/id/${encodeURIComponent(tid)}?type=cds&content-type=application/json`,
         { headers: { Accept: "application/json" } }, { signal }
       );
       const seq = String((await res.json()).seq || "").toUpperCase().replace(/[^ACGTN]/g, "");
-      if (seq.length < 3) return;
+      if (seq.length < 3) { fail(`Ensembl returned no CDS for ${tid}`); return; }
       rec = { transcript: tid, seq };
       cacheSet(key, rec);
     }
@@ -1645,9 +1652,10 @@ async function loadCds(gene, accession, fullData, requestId, signal) {
     helixData.cds = rec.seq;
     helixData.transcript = rec.transcript;
     helixData.cdsMatches = protein ? translated === protein : null;
+    helixData.cdsState = "ok";
     requestHelixDraw();
   } catch (e) {
-    if (e.name !== "AbortError") console.warn("CDS load failed:", e);
+    if (e.name !== "AbortError") fail(e);
   }
 }
 
@@ -1831,7 +1839,9 @@ async function loadCds(gene, accession, fullData, requestId, signal) {
         ? `${helixData.transcript} · isoform ≠ UniProt`
         : helixData.transcript;
     } else if (helixData.length) {
-      main = `${helixData.gene} · loading sequence…`;
+      main = helixData.cdsState === "failed"
+        ? `${helixData.gene} · sequence unavailable`
+        : `${helixData.gene} · loading sequence…`;
     }
     const caption = main + "|" + sub;
     if (caption !== lastCaption) { lastCaption = caption; setTip(main, sub, false); }
