@@ -307,7 +307,12 @@
   .jp-dot { width: 7px; height: 7px; border-radius: 50%; background: var(--accent); box-shadow: 0 0 10px var(--accent); animation: jp-pulse 1.8s ease-in-out infinite; }
   .jp-caret { color: var(--text-dim); font-size: 0.65rem; }
   .jp-label { display: inline-block; min-width: 5.5em; }
-  .jp-label.swap { animation: jp-swap 0.35s cubic-bezier(0.2, 0.8, 0.2, 1); }
+  .dna { color: var(--text-dim); opacity: 0.75; }
+  .dna-caret {
+    display: inline-block; width: 0; height: 0.95em; vertical-align: -0.12em; margin: 0 1px;
+    border-left: 1.5px solid var(--accent); animation: dna-blink 0.5s steps(1) infinite;
+  }
+  @keyframes dna-blink { 50% { border-color: transparent; } }
   .jp-bar {
     position: absolute; left: 0; bottom: 0; height: 2px; width: 100%; background: var(--accent);
     transform-origin: left; transform: scaleX(0);
@@ -324,7 +329,6 @@
   .jp-option:hover { background: rgba(232, 169, 74, 0.08); color: var(--text); }
   .jp-option.active { color: var(--accent); }
   @keyframes jp-pulse { 0%, 100% { opacity: 0.55; } 50% { opacity: 1; } }
-  @keyframes jp-swap { from { opacity: 0; transform: translateY(6px); } to { opacity: 1; transform: none; } }
 
   @media (max-width: 1340px) {
     .jump-rail { display: none !important; }
@@ -332,5 +336,5 @@
   }
   @media (prefers-reduced-motion: reduce) {
     .jr-fill, .jr-item, .jr-dot, .jr-label { transition: none; }
-    .jp-dot, .jp-label.swap { animation: none; }
+    .jp-dot, .dna-caret { animation: none; }
   }
