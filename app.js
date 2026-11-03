@@ -1728,6 +1728,8 @@ async function loadCds(gene, accession, fullData, requestId, signal) {
   let offset = 0, spin = 0, hoverBp = -1, flags = null, varByRes = new Map(), domByRes = [];
   let lastCaption = "";
   let focus = null; // { res, source, y0 } — a single residue lit from the structure or a map
+  let manual = null; // { offset, y0 } — set by the up/down buttons
+  let upBtn, downBtn;
 
   const visibleBp = () => Math.max(1, Math.floor((H - TOP * 2) / STEP));
 
@@ -1751,6 +1753,7 @@ async function loadCds(gene, accession, fullData, requestId, signal) {
     const len = helixData.cds.length;
     const n = visibleBp();
     const maxOff = Math.max(0, len - n);
+    if (manual) return Math.min(maxOff, Math.max(0, manual.offset));
     if (focus) {
       const mid = (focus.res - 1) * 3 + 1.5;
       return Math.min(maxOff, Math.max(0, mid - n / 2));
@@ -1870,10 +1873,19 @@ async function loadCds(gene, accession, fullData, requestId, signal) {
         ctx.fillStyle = lit ? "#ff4d4d" : "#e07a5f";
         ctx.beginPath(); ctx.arc(x1, y, 2.1, 0, Math.PI * 2); ctx.arc(x2, y, 2.1, 0, Math.PI * 2); ctx.fill();
       }
+      // Mark the real start and stop codons when they scroll into view
+      if (hasSeq && (b === 0 || b === cds.length - 3)) {
+        ctx.globalAlpha = 1;
+        ctx.fillStyle = "#e8a94a";
+        ctx.font = "500 7px 'JetBrains Mono', monospace";
+        ctx.textBaseline = "middle";
+        ctx.fillText(b === 0 ? "ATG" : "STOP", cx + R + 5, y + (b === 0 ? 0 : STEP));
+      }
     }
     ctx.globalAlpha = 1;
 
     if (hoverBp < 0) idleCaption();
+    updateButtons();
   }
 
   function setTip(main, sub, accent) {
@@ -1961,6 +1973,46 @@ async function loadCds(gene, accession, fullData, requestId, signal) {
     );
   }
 
+  /* Up/down buttons: step one codon per click, hold to keep moving */
+  function maxOffset() { return Math.max(0, helixData.cds.length - visibleBp()); }
+
+  function step(dir) {
+    if (!helixData.cds) return;
+    const from = manual ? manual.offset : Math.round(offset);
+    const next = Math.min(maxOffset(), Math.max(0, from + dir * 3));
+    manual = { offset: next, y0: window.scrollY };
+    focus = null;
+    lastCaption = "";
+    updateButtons();
+    if (!raf) draw(performance.now(), true);
+  }
+
+  function updateButtons() {
+    if (!upBtn) return;
+    const show = !!helixData.cds;
+    upBtn.hidden = downBtn.hidden = !show;
+    wrap.querySelectorAll(".helix-end").forEach(el => { el.hidden = !show; });
+    if (!show) return;
+    const cur = manual ? manual.offset : Math.round(offset);
+    upBtn.disabled = cur <= 0;
+    downBtn.disabled = cur >= maxOffset();
+  }
+
+  function wireHold(btn, dir) {
+    let delay = 0, repeat = 0;
+    const stop = () => { clearTimeout(delay); clearInterval(repeat); };
+    btn.addEventListener("pointerdown", e => {
+      if (e.button !== 0 || btn.disabled) return;
+      e.preventDefault();
+      step(dir);
+      delay = setTimeout(() => { repeat = setInterval(() => step(dir), 70); }, 350);
+    });
+    ["pointerup", "pointerleave", "pointercancel"].forEach(ev => btn.addEventListener(ev, stop));
+    btn.addEventListener("keydown", e => {
+      if (e.key === "Enter" || e.key === " ") { e.preventDefault(); step(dir); }
+    });
+  }
+
   function loop(now) {
     raf = requestAnimationFrame(loop);
     if (now - lastFrame < 33) return;
@@ -1978,8 +2030,14 @@ async function loadCds(gene, accession, fullData, requestId, signal) {
     wrap = document.createElement("div");
     wrap.className = "helix";
     wrap.innerHTML = `
+      <div class="helix-end helix-end-top" hidden>5′ · start</div>
       <div class="helix-stage"><canvas aria-hidden="true"></canvas></div>
+      <div class="helix-end helix-end-bottom" hidden>3′ · end</div>
       <div class="helix-tip"><div class="helix-tip-main"></div><div class="helix-tip-sub"></div></div>
+      <div class="helix-nav">
+        <button type="button" class="helix-btn" data-dir="-1" aria-label="Move toward the start (5′ end)" title="Toward the start (5′)" hidden>&#9650;</button>
+        <button type="button" class="helix-btn" data-dir="1" aria-label="Move toward the end (3′ end)" title="Toward the end (3′)" hidden>&#9660;</button>
+      </div>
       <div class="helix-legend" hidden>
         <span style="color:${BASE_COLORS.A}">A</span><span style="color:${BASE_COLORS.T}">T</span>
         <span style="color:${BASE_COLORS.G}">G</span><span style="color:${BASE_COLORS.C}">C</span>
@@ -1990,9 +2048,13 @@ async function loadCds(gene, accession, fullData, requestId, signal) {
     tipMain = wrap.querySelector(".helix-tip-main");
     tipSub = wrap.querySelector(".helix-tip-sub");
     legend = wrap.querySelector(".helix-legend");
+    [upBtn, downBtn] = wrap.querySelectorAll(".helix-btn");
+    wireHold(upBtn, -1);
+    wireHold(downBtn, 1);
 
     focusHelix = (res, source) => {
       focus = res && codonInfo(res) ? { res, source, y0: window.scrollY } : null;
+      if (res) manual = null;
       lastCaption = "";
       if (focus && !wide.matches) return;
       if (!raf) draw(performance.now(), reduceMotion);
@@ -2000,10 +2062,12 @@ async function loadCds(gene, accession, fullData, requestId, signal) {
     // Scrolling away hands the helix back to scroll-following
     window.addEventListener("scroll", () => {
       if (focus && Math.abs(window.scrollY - focus.y0) > 160) { focus = null; lastCaption = ""; }
+      if (manual && Math.abs(window.scrollY - manual.y0) > 160) { manual = null; lastCaption = ""; }
     }, { passive: true });
 
     requestHelixDraw = () => {
       rebuildFlags();
+      if (!helixData.cds || highlightedDomain) manual = null;
       lastCaption = "";
       if (!raf) requestAnimationFrame(() => draw(performance.now(), true));
     };
