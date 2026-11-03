@@ -1094,7 +1094,10 @@ function renderVariants(variants, proteinLength) {
   list.innerHTML = "";
   hint.textContent = "";
 
-  helixData.variants = variants || [];
+  // Drop positions past the end of this protein (they belong to other isoforms)
+  const maxRes = Number(proteinLength) || Infinity;
+  variants = (variants || []).filter(v => v.pos >= 1 && v.pos <= maxRes);
+  helixData.variants = variants;
   requestHelixDraw();
 
   if (!variants?.length) {
@@ -2052,14 +2055,21 @@ async function loadCds(gene, accession, fullData, requestId, signal) {
     const len = helixData.cds.length;
     if (!len) return;
     const pct = bp => `${(bp / len) * 100}%`;
+    // Only marks that fall inside this coding sequence (some variant/domain
+    // coordinates refer to other isoforms and run past the end)
+    const lastRes = Math.floor(len / 3);
     helixData.domains.forEach(d => {
+      const start = Math.max(1, d.fragment.start);
+      const end = Math.min(lastRes, d.fragment.end);
+      if (start > end) return;
       const el = document.createElement("div");
       el.className = "hs-domain";
-      el.style.top = pct((d.fragment.start - 1) * 3);
-      el.style.height = pct((d.fragment.end - d.fragment.start + 1) * 3);
+      el.style.top = pct((start - 1) * 3);
+      el.style.height = pct((end - start + 1) * 3);
       sMarks.appendChild(el);
     });
     helixData.variants.forEach(v => {
+      if (v.pos < 1 || v.pos > lastRes) return;
       const el = document.createElement("div");
       el.className = "hs-variant";
       el.style.top = pct((v.pos - 1) * 3 + 1.5);
