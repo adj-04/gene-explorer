@@ -1256,6 +1256,39 @@ function renderExpression(rows, gene) {
   let ticking = false;
   let layoutQueued = false;
 
+  // DNA "decode" effect: the label starts as a flickering A/T/G/C strand, then
+  // types itself out left to right into the section name.
+  const BASES = "ATGC";
+  const decoding = new WeakMap();
+  function decode(el, text) {
+    if (!el) return;
+    const prev = decoding.get(el);
+    if (prev) cancelAnimationFrame(prev);
+    if (reduceMotion) { el.textContent = text; return; }
+    const HOLD = 160;   // ms of pure DNA before typing starts
+    const PER = 42;     // ms per typed letter
+    const FLICKER = 55; // ms between base reshuffles
+    let start = null, lastShuffle = -1, strand = "";
+    const tick = now => {
+      if (start === null) start = now;
+      const t = now - start;
+      const typed = t < HOLD ? 0 : Math.min(text.length, Math.floor((t - HOLD) / PER) + 1);
+      const shuffle = Math.floor(t / FLICKER);
+      if (shuffle !== lastShuffle) {
+        lastShuffle = shuffle;
+        strand = Array.from(text, ch => (ch === " " ? " " : BASES[(Math.random() * 4) | 0])).join("");
+      }
+      if (typed >= text.length) {
+        el.textContent = text;
+        decoding.delete(el);
+        return;
+      }
+      el.innerHTML = `${escapeHtml(text.slice(0, typed))}<span class="dna-caret"></span><span class="dna">${strand.slice(typed)}</span>`;
+      decoding.set(el, requestAnimationFrame(tick));
+    };
+    decoding.set(el, requestAnimationFrame(tick));
+  }
+
   const find = sel => (sel.startsWith(".") ? document.querySelector(sel) : document.getElementById(sel));
   const isShown = node => node && !node.hidden && node.getClientRects().length > 0 && node.getBoundingClientRect().height > 0;
   const docHeight = () => Math.max(document.documentElement.scrollHeight, 1);
@@ -1330,6 +1363,9 @@ function renderExpression(rows, gene) {
         item.className = "jr-item";
         item.innerHTML = `<button type="button" class="jr-dot" aria-label="Jump to ${s.label}"></button><span class="jr-label">${s.label}</span>`;
         const dot = item.querySelector(".jr-dot");
+        const label = item.querySelector(".jr-label");
+        item.addEventListener("mouseenter", () => decode(label, s.label));
+        dot.addEventListener("focus", () => decode(label, s.label));
         railInner.appendChild(item);
 
         const option = document.createElement("button");
@@ -1338,7 +1374,7 @@ function renderExpression(rows, gene) {
         option.textContent = s.label;
         menu.appendChild(option);
 
-        const it = { ...s, item, dot, option, top: 0, y: 0 };
+        const it = { ...s, item, dot, label, option, top: 0, y: 0 };
         dot.addEventListener("click", () => go(it));
         option.addEventListener("click", () => go(it));
         return it;
@@ -1389,10 +1425,8 @@ function renderExpression(rows, gene) {
 
     if (current.sel !== activeSel) {
       activeSel = current.sel;
-      pillLabel.textContent = current.label;
-      pillLabel.classList.remove("swap");
-      void pillLabel.offsetWidth; // restart the slide-in animation
-      pillLabel.classList.add("swap");
+      decode(current.label && current.item.querySelector(".jr-label"), current.label);
+      if (!pill.hidden) decode(pillLabel, current.label);
     }
   }
 
