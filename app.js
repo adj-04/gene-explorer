@@ -1,1563 +1,351 @@
-"use strict";
-
-let viewer = null;
-let model = null;
-let spinning = false;
-let currentPdbData = "";
-let currentGeneName = "";
-let currentProteinLength = 0;
-let highlightedDomain = null;
-
-const RECENT_KEY = "gene-explorer-recent";
-const MAX_RECENT = 3;
-const MAX_VARIANT_CARDS = 60;
-const VARIANTS_COLLAPSED = 6;
-
-const CACHE_KEY = "gene-explorer-cache-v1";
-const CACHE_TTL_MS = 24 * 60 * 60 * 1000;
-const REQUEST_TIMEOUT_MS = 20000;
-const MAX_RETRIES = 3;
-let activeController = null;
-let requestSequence = 0;
-
-function getCache() {
-  try { return JSON.parse(localStorage.getItem(CACHE_KEY) || "{}"); }
-  catch { return {}; }
-}
-function setCache(cache) {
-  try { localStorage.setItem(CACHE_KEY, JSON.stringify(cache)); }
-  catch (e) { console.warn("Cache write failed:", e); }
-}
-function cacheGet(key) {
-  const item = getCache()[key];
-  if (!item || Date.now() - item.timestamp > CACHE_TTL_MS) return null;
-  return item.value;
-}
-function cacheSet(key, value) {
-  const cache = getCache();
-  cache[key] = { timestamp: Date.now(), value };
-  setCache(cache);
-}
-function cacheKey(type, key) {
-  return `${type}:${String(key).toUpperCase()}`;
-}
-
-function sleep(ms) {
-  return new Promise(resolve => setTimeout(resolve, ms));
-}
-
-function retryDelay(attempt, retryAfter) {
-  if (retryAfter) {
-    const seconds = Number(retryAfter);
-    if (Number.isFinite(seconds)) return Math.min(seconds * 1000, 10000);
+:root {
+    --bg: #0a0a0a;
+    --panel: #131311;
+    --border: #262622;
+    --text: #e8e6df;
+    --text-dim: #85837a;
+    --accent: #e8a94a;
   }
-  return Math.min(1000 * 2 ** attempt, 8000) + Math.floor(Math.random() * 250);
-}
-
-async function apiFetch(url, options = {}, { retries = MAX_RETRIES, timeout = REQUEST_TIMEOUT_MS, signal } = {}) {
-  let lastError;
-  for (let attempt = 0; attempt <= retries; attempt++) {
-    if (signal?.aborted) throw new DOMException("Request cancelled", "AbortError");
-    const controller = new AbortController();
-    const onAbort = () => controller.abort();
-    signal?.addEventListener("abort", onAbort, { once: true });
-    const timer = setTimeout(() => controller.abort(), timeout);
-    try {
-      const response = await fetch(url, { ...options, signal: controller.signal });
-      clearTimeout(timer);
-      signal?.removeEventListener("abort", onAbort);
-      if (response.ok) return response;
-      const retryable = response.status === 429 || response.status >= 500;
-      if (!retryable || attempt === retries) {
-        throw new Error(`Request failed (${response.status})`);
-      }
-      await sleep(retryDelay(attempt, response.headers.get("Retry-After")));
-    } catch (error) {
-      clearTimeout(timer);
-      signal?.removeEventListener("abort", onAbort);
-      if (error.name === "AbortError") {
-        if (signal?.aborted) throw new DOMException("Request cancelled", "AbortError");
-        lastError = new Error("Request timed out.");
-      } else {
-        lastError = error;
-      }
-      if (attempt === retries) throw lastError;
-      await sleep(retryDelay(attempt));
-    }
+  * { box-sizing: border-box; }
+  html, body { background: var(--bg); }
+  body {
+    font-family: 'Space Grotesk', sans-serif;
+    color: var(--text);
+    margin: 0;
+    padding: 2.5rem 2rem 4rem;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
   }
-  throw lastError || new Error("Request failed.");
-}
-
-function setStatus(msg, isErr = false, loading = false) {
-  const s = document.getElementById("status");
-  s.textContent = msg || "";
-  s.className = "status" + (isErr ? " err" : "") + (loading ? " loading" : "");
-}
-
-function setLoading(loading) {
-  ["geneInput","searchButton","styleSelect","colorSelect","spinToggle","resetButton",
-   "zoomOutButton","zoomInButton","downloadPdbButton","downloadPngButton"]
-    .forEach(id => { const el = document.getElementById(id); if (el) el.disabled = loading; });
-  document.getElementById("searchButton").textContent = loading ? "Loading…" : "Search";
-  const rail = document.getElementById("progressRail");
-  rail.hidden = !loading;
-  if (loading) setProgress(0);
-}
-
-function setProgress(activeIndex) {
-  const segs = document.querySelectorAll("#progressRail .progress-seg");
-  segs.forEach((seg, i) => {
-    seg.classList.toggle("done", i < activeIndex);
-    seg.classList.toggle("active", i === activeIndex);
-  });
-}
-
-function resetResultPanels() {
-  document.getElementById("info").innerHTML = "";
-  document.getElementById("learnGrid").innerHTML = "";
-  document.getElementById("learnEmpty").style.display = "block";
-  document.getElementById("residueBar").textContent = "Click any residue in the structure to inspect it.";
-  document.getElementById("locationSection").style.display = "none";
-  document.getElementById("interproSection").hidden = true;
-  document.getElementById("interproMeta").textContent = "";
-  document.getElementById("domainMap").innerHTML = "";
-  document.getElementById("domainScale").innerHTML = "";
-  document.getElementById("interproList").innerHTML = "";
-  document.getElementById("interproHint").textContent = "";
-  document.getElementById("ideoContainer").innerHTML = "";
-  document.getElementById("ideoHint").textContent = "";
-  document.getElementById("ideoLocText").textContent = "";
-  resetExtraSections();
-  highlightedDomain = null;
-  currentProteinLength = 0;
-  currentPdbData = "";
-  model = null;
-  if (viewer) {
-    try { viewer.clear(); viewer.render(); } catch (e) { console.warn("Viewer reset failed:", e); }
+  .page { width: 100%; max-width: 980px; }
+  .eyebrow {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 0.7rem;
+    letter-spacing: 0.15em;
+    text-transform: uppercase;
+    color: var(--accent);
+    margin-bottom: 0.4rem;
   }
-}
-
-function isCurrentRequest(id) {
-  return id === requestSequence;
-}
-
-window.addEventListener("load", () => {
-  try {
-    const empty = document.getElementById("emptyState");
-    if (empty) empty.remove();
-    viewer = $3Dmol.createViewer("viewer", { backgroundColor: 0x000000 });
-    viewer.render();
-    attachGentleZoom(document.getElementById("viewer"), () => viewer);
-  } catch (e) {
-    setStatus("Viewer failed to initialize: " + e.message, true);
-    console.error(e);
+  h1 { font-size: 2.1rem; font-weight: 700; margin: 0 0 0.4rem; letter-spacing: -0.02em; }
+  .subtitle {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 0.8rem;
+    color: var(--text-dim);
+    margin: 0 0 1.8rem;
   }
-
-  document.getElementById("searchButton").addEventListener("click", loadGene);
-  document.getElementById("geneInput").addEventListener("keydown", e => {
-    if (e.key === "Enter" && !e.repeat) loadGene();
-  });
-  document.getElementById("styleSelect").addEventListener("change", () => { applyColoring(); reapplyDomainHighlight(); });
-  document.getElementById("colorSelect").addEventListener("change", () => { applyColoring(); reapplyDomainHighlight(); });
-  document.getElementById("spinToggle").addEventListener("change", toggleSpin);
-  document.getElementById("resetButton").addEventListener("click", resetView);
-  document.getElementById("zoomInButton").addEventListener("click", zoomIn);
-  document.getElementById("zoomOutButton").addEventListener("click", zoomOut);
-  document.getElementById("downloadPdbButton").addEventListener("click", downloadPDB);
-  document.getElementById("downloadPngButton").addEventListener("click", downloadPNG);
-
-  document.getElementById("info").addEventListener("click", e => {
-    const toggle = e.target.closest(".collapsible-toggle");
-    if (toggle) toggleCollapsible(toggle.dataset.target);
-  });
-
-  // Recent-search chips load a gene on click (partner chips open a new tab instead)
-  document.getElementById("recentRow")?.addEventListener("click", e => {
-    const chip = e.target.closest(".gene-chip");
-    if (chip?.dataset.gene) searchGene(chip.dataset.gene);
-  });
-  document.getElementById("variantMore")?.addEventListener("click", toggleVariantCards);
-  renderRecent();
-
-  // Shareable links: ?gene=FMR1 loads that gene straight away
-  const geneParam = new URLSearchParams(window.location.search).get("gene");
-  if (geneParam) {
-    document.getElementById("geneInput").value = geneParam;
-    loadGene();
+  .controls { display: flex; align-items: center; gap: 1rem; margin-bottom: 1rem; flex-wrap: wrap; }
+  .controls-row2 {
+    display: flex; align-items: center; gap: 1.2rem; margin-bottom: 1.5rem;
+    flex-wrap: wrap; padding-top: 0.9rem; border-top: 1px solid var(--border);
   }
-});
-
-function attachGentleZoom(el, getViewer) {
-  el.addEventListener("wheel", (e) => {
-    const v = getViewer();
-    if (!v) return;
-    e.preventDefault();
-    e.stopPropagation();
-    const factor = e.deltaY > 0 ? 0.97 : 1.03;
-    v.zoom(factor, 0);
-    v.render();
-  }, { passive: false, capture: true });
-}
-
-async function fetchUniprotAccession(gene, organismClause, signal) {
-  const key = cacheKey("uniprot-search", gene);
-  const cached = cacheGet(key);
-  if (cached) return cached;
-  const url = `https://rest.uniprot.org/uniprotkb/search?query=gene:${gene}+AND+reviewed:true${organismClause}&fields=accession,protein_name,organism_name,length,mass,cc_function,cc_disease,gene_names,cc_subcellular_location&format=json&size=1`;
-  const res = await apiFetch(url, {}, { signal });
-  const data = await res.json();
-  const result = data.results?.[0] || null;
-  if (result) cacheSet(key, result);
-  return result;
-}
-
-async function fetchAlphaFoldStructure(accession, signal) {
-  const key = cacheKey("alphafold-pdb", accession);
-  const cached = cacheGet(key);
-  if (cached) return cached;
-  const metaRes = await apiFetch(`https://alphafold.ebi.ac.uk/api/prediction/${accession}`, {}, { signal });
-  const metaData = await metaRes.json();
-  if (!metaData?.length || !metaData[0]?.pdbUrl) return null;
-  const pdbRes = await apiFetch(metaData[0].pdbUrl, {}, { signal });
-  const pdb = await pdbRes.text();
-  if (pdb) cacheSet(key, pdb);
-  return pdb || null;
-}
-
-async function fetchInterProAnnotations(accession, signal) {
-  const key = cacheKey("interpro", accession);
-  const cached = cacheGet(key);
-  if (cached) return cached;
-
-  let url = `https://www.ebi.ac.uk/interpro/api/entry/interpro/protein/uniprot/${encodeURIComponent(accession)}/?page_size=200`;
-  const results = [];
-  let pages = 0;
-
-  while (url && pages < 10) {
-    const res = await apiFetch(url, { headers: { Accept: "application/json" } }, { signal });
-    const data = await res.json();
-    results.push(...(data.results || []));
-    url = data.next || null;
-    pages++;
+  .controls-row3 {
+    display: flex; align-items: center; gap: 0.8rem; margin-bottom: 1.5rem; flex-wrap: wrap;
+  }
+  input[type="text"] {
+    background: var(--panel); border: 1px solid var(--border); color: var(--text);
+    padding: 0.7rem 1rem; font-family: 'JetBrains Mono', monospace; font-size: 0.9rem;
+    width: 260px; border-radius: 4px;
+  }
+  input[type="text"]:focus { outline: none; border-color: var(--accent); }
+  select {
+    background: var(--panel); border: 1px solid var(--border); color: var(--text);
+    padding: 0.5rem 0.7rem; font-family: 'JetBrains Mono', monospace; font-size: 0.8rem;
+    border-radius: 4px; cursor: pointer;
+  }
+  button {
+    background: var(--accent); color: #1a1200; border: none; padding: 0.7rem 1.4rem;
+    font-family: 'Space Grotesk', sans-serif; font-weight: 700; font-size: 0.9rem;
+    cursor: pointer; border-radius: 4px;
+  }
+  button:hover { background: #f0b862; }
+  button.ghost {
+    background: transparent; color: var(--text-dim); border: 1px solid var(--border);
+    font-weight: 500; padding: 0.5rem 0.9rem; font-size: 0.8rem;
+  }
+  button.ghost:hover { border-color: var(--accent); color: var(--accent); }
+  .checkbox-row {
+    display: flex; align-items: center; gap: 0.5rem;
+    font-family: 'JetBrains Mono', monospace; font-size: 0.8rem; color: var(--text-dim);
+  }
+  .control-label { font-family: 'JetBrains Mono', monospace; font-size: 0.7rem; color: var(--text-dim); letter-spacing: 0.05em; }
+  .zoom-controls {
+    display: flex; align-items: center; gap: 0.3rem; background: var(--panel);
+    border: 1px solid var(--border); border-radius: 4px; padding: 0.2rem;
+  }
+  .zoom-btn {
+    background: transparent; color: var(--text); border: none; width: 30px; height: 30px;
+    padding: 0; font-size: 1.1rem; font-weight: 700; line-height: 1; border-radius: 3px; cursor: pointer;
+  }
+  .zoom-btn:hover { background: var(--accent); color: #1a1200; }
+  #viewer {
+    width: 100%; height: 640px; background: #000; border: 1px solid var(--border);
+    border-radius: 8px; position: relative; overflow: hidden; cursor: pointer;
+  }
+  .viewer-meta { display: flex; justify-content: space-between; align-items: center; margin-top: 0.7rem; flex-wrap: wrap; gap: 0.8rem; }
+  .viewer-hint { font-family: 'JetBrains Mono', monospace; font-size: 0.7rem; color: var(--text-dim); letter-spacing: 0.02em; }
+  .legend { display: flex; gap: 1rem; font-family: 'JetBrains Mono', monospace; font-size: 0.7rem; color: var(--text-dim); }
+  .legend span { display: inline-flex; align-items: center; gap: 0.35rem; }
+  .swatch { width: 9px; height: 9px; border-radius: 2px; display: inline-block; }
+  .spectrum-bar { display: flex; align-items: center; gap: 0.5rem; font-family: 'JetBrains Mono', monospace; font-size: 0.68rem; color: var(--text-dim); }
+  .spectrum-gradient { width: 100px; height: 8px; border-radius: 4px; background: linear-gradient(to right, #0000FF, #00FFFF, #00FF00, #FFFF00, #FF0000); }
+  .ss-legend { display: flex; gap: 1rem; font-family: 'JetBrains Mono', monospace; font-size: 0.7rem; color: var(--text-dim); }
+  .residue-bar {
+    margin-top: 0.7rem; padding: 0.6rem 0.9rem; background: var(--panel);
+    border: 1px solid var(--border); border-radius: 4px;
+    font-family: 'JetBrains Mono', monospace; font-size: 0.8rem; color: var(--text-dim);
+    min-height: 1.4rem;
+  }
+  .residue-bar strong { color: var(--accent); }
+  #info { margin-top: 2rem; display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 1.5rem; }
+  .field { border-top: 1px solid var(--border); padding-top: 0.8rem; }
+  .field-label {
+    font-family: 'JetBrains Mono', monospace; font-size: 0.68rem; letter-spacing: 0.1em;
+    text-transform: uppercase; color: var(--accent); margin-bottom: 0.4rem;
+  }
+  .field-value { font-size: 0.92rem; line-height: 1.55; color: var(--text); }
+  .field-value.mono { font-family: 'JetBrains Mono', monospace; font-size: 0.85rem; }
+  .field-value.scroll { max-height: 130px; overflow-y: auto; padding-right: 0.5rem; }
+  .field-value.scroll::-webkit-scrollbar { width: 6px; }
+  .field-value.scroll::-webkit-scrollbar-thumb { background: var(--border); border-radius: 3px; }
+  .field.wide { grid-column: 1 / -1; }
+  .ref-item { padding: 0.6rem 0; border-bottom: 1px solid var(--border); font-size: 0.85rem; line-height: 1.4; }
+  .ref-item:last-child { border-bottom: none; }
+  .ref-item a { color: var(--accent); text-decoration: none; }
+  .ref-item a:hover { text-decoration: underline; }
+  .ref-item .ref-title-link { font-family: 'Space Grotesk', sans-serif; font-size: 0.85rem; color: var(--accent); display: block; margin-bottom: 0.2rem; }
+  .ref-item .ref-meta { color: var(--text-dim); font-family: 'JetBrains Mono', monospace; font-size: 0.72rem; }
+  .status { font-family: 'JetBrains Mono', monospace; font-size: 0.85rem; color: var(--text-dim); margin-top: 0.8rem; }
+  .progress-rail { display: flex; gap: 4px; margin-top: 0.6rem; }
+  .progress-seg { flex: 1; height: 3px; border-radius: 2px; background: var(--border); transition: background 0.2s; position: relative; }
+  .progress-seg.done { background: var(--accent); }
+  .progress-seg.active { background: var(--accent); opacity: 0.55; animation: progress-pulse 1.1s ease-in-out infinite; }
+  @keyframes progress-pulse { 0%, 100% { opacity: 0.35; } 50% { opacity: 0.9; } }
+  .status.err { color: #e07a5f; }
+  .empty-state {
+    height: 100%; display: flex; align-items: center; justify-content: center;
+    color: var(--text-dim); font-family: 'JetBrains Mono', monospace; font-size: 0.85rem;
+  }
+  .location-section {
+    margin-top: 2.5rem; border-top: 1px solid var(--border); padding-top: 1.5rem; display: none;
+  }
+  .location-meta {
+    font-family: 'JetBrains Mono', monospace; font-size: 0.85rem; color: var(--text);
+    margin: 0.2rem 0 1.2rem;
+  }
+  .ideo-container {
+    width: 100%; overflow-x: auto; background: var(--panel); border: 1px solid var(--border);
+    border-radius: 8px; padding: 1rem 0.5rem;
+  }
+  .ideo-container svg { display: block; margin: 0 auto; }
+  .ideo-hint {
+    font-family: 'JetBrains Mono', monospace; font-size: 0.7rem; color: var(--text-dim);
+    margin-top: 0.6rem;
+  }
+  .learn-section { margin-top: 2.5rem; border-top: 1px solid var(--border); padding-top: 1.5rem; }
+  .learn-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 0.9rem; margin-top: 1rem; }
+  .learn-card {
+    display: block; background: var(--panel); border: 1px solid var(--border);
+    border-radius: 6px; padding: 0.9rem 1rem; text-decoration: none;
+    transition: border-color 0.15s;
+  }
+  .learn-card:hover { border-color: var(--accent); }
+  .learn-name {
+    font-family: 'Space Grotesk', sans-serif; font-weight: 700; font-size: 0.9rem;
+    color: var(--text); margin-bottom: 0.25rem;
+  }
+  .learn-desc {
+    font-family: 'JetBrains Mono', monospace; font-size: 0.72rem; color: var(--text-dim);
+  }
+  .learn-empty {
+    font-family: 'JetBrains Mono', monospace; font-size: 0.8rem; color: var(--text-dim);
+    margin-top: 1rem;
+  }
+  .field.collapsible .field-label {
+    display: flex; align-items: center; justify-content: space-between; cursor: pointer;
+    user-select: none;
+  }
+  .field.collapsible .field-label .caret {
+    font-size: 0.7rem; color: var(--text-dim); transition: transform 0.15s;
+  }
+  .field.collapsible.open .field-label .caret { transform: rotate(90deg); }
+  .field.collapsible .ss-detail {
+    display: none; margin-top: 0.7rem; font-family: 'JetBrains Mono', monospace;
+    font-size: 0.78rem; color: var(--text-dim); line-height: 1.6;
+  }
+  .field.collapsible.open .ss-detail { display: block; }
+  .ss-bar-row { display: flex; align-items: center; gap: 0.6rem; margin-top: 0.35rem; }
+  .ss-bar-track { flex: 1; height: 6px; border-radius: 3px; background: var(--border); overflow: hidden; }
+  .ss-bar-fill { height: 100%; border-radius: 3px; }
+  button:disabled, input:disabled, select:disabled { opacity: 0.55; cursor: not-allowed; }
+  .status.loading { color: var(--accent); }
+  .status.err { color: #e07a5f; }
+  .error-note {
+    margin-top: 0.8rem; padding: 0.7rem 0.9rem; border: 1px solid #5a3028;
+    background: rgba(224,122,95,0.08); border-radius: 4px; color: #e07a5f;
+    font-family: 'JetBrains Mono', monospace; font-size: 0.75rem;
+  }
+  .field-label button.collapsible-toggle {
+    all: unset; width: 100%; display: flex; align-items: center; justify-content: space-between;
+    cursor: pointer; color: inherit; font: inherit;
+  }
+  .field-label button.collapsible-toggle:focus-visible,
+  button:focus-visible, input:focus-visible, select:focus-visible, a:focus-visible {
+    outline: 2px solid var(--accent); outline-offset: 2px;
   }
 
-  const normalized = results.map(entry => {
-    const metadata = entry.metadata || {};
-    const protein = entry.proteins?.[0] || {};
-    const locations = protein.entry_protein_locations || [];
-    const fragments = locations.flatMap(location =>
-      (location.fragments || []).map(fragment => ({
-        start: Number(fragment.start),
-        end: Number(fragment.end),
-        representative: fragment.representative === true
-      }))
-    ).filter(f => Number.isFinite(f.start) && Number.isFinite(f.end) && f.start > 0 && f.end >= f.start);
+  .interpro-section { margin-top: 2.5rem; border-top: 1px solid var(--border); padding-top: 1.5rem; }
+  .interpro-section[hidden], .location-section[hidden] { display: none; }
+  .interpro-meta { font-family: 'JetBrains Mono', monospace; font-size: 0.78rem; color: var(--text-dim); margin: 0.2rem 0 1rem; }
+  .domain-map { position: relative; min-height: 44px; background: var(--panel); border: 1px solid var(--border); border-radius: 8px; padding: 1.25rem 0.8rem 1rem; overflow: hidden; }
+  .domain-track { position: relative; height: 10px; margin: 0 0.2rem; background: #262622; border-radius: 5px; }
+  .domain-bar { position: absolute; top: -5px; height: 20px; min-width: 3px; border-radius: 4px; border: 1px solid rgba(255,255,255,0.18); background: var(--accent); cursor: pointer; transition: filter 0.15s, transform 0.15s; }
+  .domain-bar:hover, .domain-bar:focus { filter: brightness(1.2); transform: translateY(-1px); outline: 2px solid var(--accent); outline-offset: 2px; }
+  .domain-bar.active { filter: brightness(1.3); border-color: #ff4d4d; box-shadow: 0 0 0 2px #ff4d4d; }
+  .domain-scale { display: flex; justify-content: space-between; margin: 0.35rem 0.35rem 0; font-family: 'JetBrains Mono', monospace; font-size: 0.65rem; color: var(--text-dim); }
+  .interpro-list { display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 0.7rem; margin-top: 1rem; }
+  .interpro-item { background: var(--panel); border: 1px solid var(--border); border-radius: 6px; padding: 0.75rem 0.85rem; }
+  .interpro-item:hover { border-color: var(--accent); }
+  .interpro-item.clickable { cursor: pointer; }
+  .interpro-item.clickable:focus { outline: 2px solid var(--accent); outline-offset: 2px; }
+  .interpro-item.active { border-color: #ff4d4d; box-shadow: 0 0 0 1px #ff4d4d; }
+  .interpro-item-head { display: flex; align-items: baseline; justify-content: space-between; gap: 0.7rem; }
+  .interpro-item a { color: var(--accent); text-decoration: none; font-family: 'JetBrains Mono', monospace; font-size: 0.75rem; }
+  .interpro-item a:hover { text-decoration: underline; }
+  .interpro-type { color: var(--text-dim); font-family: 'JetBrains Mono', monospace; font-size: 0.65rem; text-transform: uppercase; }
+  .interpro-name { margin-top: 0.3rem; font-size: 0.82rem; line-height: 1.4; color: var(--text); }
+  .interpro-range { margin-top: 0.35rem; color: var(--text-dim); font-family: 'JetBrains Mono', monospace; font-size: 0.68rem; }
+  .interpro-hint { margin-top: 0.65rem; color: var(--text-dim); font-family: 'JetBrains Mono', monospace; font-size: 0.68rem; }
 
-    return {
-      accession: metadata.accession || "",
-      name: typeof metadata.name === "string" ? metadata.name : (metadata.name?.name || "Unnamed InterPro entry"),
-      type: metadata.type || "feature",
-      fragments
-    };
-  }).filter(entry => entry.accession);
-
-  cacheSet(key, normalized);
-  return normalized;
-}
-
-function interProTypeLabel(type) {
-  return String(type || "feature").replace(/_/g, " ");
-}
-
-function interProTypeClass(type) {
-  const t = String(type || "").toLowerCase();
-  if (t.includes("domain")) return "domain";
-  if (t.includes("family")) return "family";
-  if (t.includes("superfamily")) return "superfamily";
-  if (t.includes("repeat")) return "repeat";
-  return "feature";
-}
-
-function renderInterPro(entries, proteinLength) {
-  const section = document.getElementById("interproSection");
-  const meta = document.getElementById("interproMeta");
-  const map = document.getElementById("domainMap");
-  const scale = document.getElementById("domainScale");
-  const list = document.getElementById("interproList");
-  const hint = document.getElementById("interproHint");
-
-  section.hidden = false;
-  map.innerHTML = "";
-  scale.innerHTML = "";
-  list.innerHTML = "";
-  hint.textContent = "";
-
-  if (!entries?.length) {
-    meta.textContent = "No InterPro entries were found for this protein.";
-    hint.textContent = "InterPro does not have a classified family, domain, or sequence feature for every protein.";
-    return;
+  @media (max-width: 640px) {
+    body { padding: 1.75rem 1.1rem 3rem; }
+    h1 { font-size: 1.7rem; }
+    input[type="text"] { width: 100%; }
+    .controls { flex-direction: column; align-items: stretch; }
+    .controls button { width: 100%; }
+    #viewer { height: 420px; }
   }
 
-  const length = Number(proteinLength) || Math.max(1, ...entries.flatMap(e => e.fragments.map(f => f.end)));
-  const locatedEntries = entries.filter(e => e.fragments.length > 0);
-  meta.textContent = `${entries.length} InterPro entr${entries.length === 1 ? "y" : "ies"} · ${locatedEntries.length} with sequence coordinates · protein length ${length} aa`;
-
-  const track = document.createElement("div");
-  track.className = "domain-track";
-  map.appendChild(track);
-
-  const colors = {
-    domain: "#e8a94a",
-    family: "#8aa7d9",
-    superfamily: "#9b8fd4",
-    repeat: "#78bfa0",
-    feature: "#85837a"
-  };
-
-  locatedEntries.forEach(entry => {
-    const color = colors[interProTypeClass(entry.type)] || colors.feature;
-    entry.fragments.forEach(fragment => {
-      const left = Math.max(0, Math.min(100, ((fragment.start - 1) / length) * 100));
-      const width = Math.max(0.7, Math.min(100 - left, ((fragment.end - fragment.start + 1) / length) * 100));
-      const domainKey = `${entry.accession}:${fragment.start}-${fragment.end}`;
-      const externalUrl = `https://www.ebi.ac.uk/interpro/entry/InterPro/${encodeURIComponent(entry.accession)}/`;
-
-      const bar = document.createElement("a");
-      bar.className = "domain-bar";
-      bar.href = externalUrl;
-      bar.target = "_blank";
-      bar.rel = "noopener";
-      bar.dataset.domainKey = domainKey;
-      bar.style.left = `${left}%`;
-      bar.style.width = `${width}%`;
-      bar.style.background = color;
-      bar.setAttribute("aria-label", `${entry.accession}: ${entry.name}, residues ${fragment.start} to ${fragment.end}. Click to highlight in the 3D structure.`);
-      bar.title = `${entry.accession} · ${entry.name} · residues ${fragment.start}-${fragment.end}`;
-      bar.addEventListener("click", (e) => {
-        if (e.metaKey || e.ctrlKey) return; // let it open externally
-        e.preventDefault();
-        highlightDomain(entry, fragment, bar);
-      });
-      track.appendChild(bar);
-    });
-  });
-
-  const scaleStart = document.createElement("span");
-  scaleStart.textContent = "1 aa";
-  const scaleEnd = document.createElement("span");
-  scaleEnd.textContent = `${length} aa`;
-  scale.append(scaleStart, scaleEnd);
-
-  const sorted = [...entries].sort((a, b) => {
-    const af = a.fragments[0]?.start ?? Infinity;
-    const bf = b.fragments[0]?.start ?? Infinity;
-    return af - bf || a.accession.localeCompare(b.accession);
-  });
-
-  sorted.forEach(entry => {
-    const item = document.createElement("div");
-    item.className = "interpro-item";
-    const ranges = entry.fragments.length
-      ? entry.fragments.map(f => `${f.start}-${f.end}`).join(", ") + " aa"
-      : "No sequence coordinates";
-    item.innerHTML = `
-      <div class="interpro-item-head">
-        <a href="https://www.ebi.ac.uk/interpro/entry/InterPro/${encodeURIComponent(entry.accession)}/" target="_blank" rel="noopener">${escapeHtml(entry.accession)}</a>
-        <span class="interpro-type">${escapeHtml(interProTypeLabel(entry.type))}</span>
-      </div>
-      <div class="interpro-name">${escapeHtml(entry.name)}</div>
-      <div class="interpro-range">${escapeHtml(ranges)}</div>
-    `;
-    const firstFragment = entry.fragments[0];
-    if (firstFragment) {
-      item.dataset.domainKey = `${entry.accession}:${firstFragment.start}-${firstFragment.end}`;
-      item.classList.add("clickable");
-      item.tabIndex = 0;
-      item.setAttribute("role", "button");
-      item.setAttribute("aria-label", `Highlight ${entry.name} on the 3D structure`);
-      item.addEventListener("click", (e) => {
-        if (e.target.closest("a")) return; // let the accession link navigate normally
-        highlightDomain(entry, firstFragment, item);
-      });
-      item.addEventListener("keydown", (e) => {
-        if (e.key === "Enter" || e.key === " ") { e.preventDefault(); highlightDomain(entry, firstFragment, item); }
-      });
-    }
-    list.appendChild(item);
-  });
-
-  hint.textContent = "Click a domain bar or card to highlight it on the 3D structure above · ctrl/cmd-click a bar to open its InterPro entry instead.";
-}
-
-async function fetchNcbiGene(geneId, signal) {
-  if (!geneId || geneId === "-") return null;
-  const key = cacheKey("ncbi-gene", geneId);
-  const cached = cacheGet(key);
-  if (cached) return cached;
-  const url = `https://eutils.ncbi.nlm.nih.gov/entrez/eutils/esummary.fcgi?db=gene&id=${geneId}&retmode=json`;
-  const res = await apiFetch(url, {}, { signal });
-  const data = await res.json();
-  const doc = data.result?.[geneId];
-  if (!doc) return null;
-
-  const summary = typeof doc.summary === "string" ? doc.summary.trim() : "";
-  let loc = null;
-  const gi = (doc.genomicinfo || [])[0];
-  const chr = doc.chromosome || gi?.chrloc;
-  if (chr && gi) {
-    const a = parseInt(gi.chrstart, 10), b = parseInt(gi.chrstop, 10);
-    if (!isNaN(a) && !isNaN(b)) {
-      loc = { chr: String(chr), mapLocation: doc.maplocation || "", start: Math.min(a, b), stop: Math.max(a, b) };
-    }
+  /* Recent searches, disease variants, interaction partners, tissue expression */
+  .recent-row { display: flex; align-items: center; gap: 0.5rem; flex-wrap: wrap; margin: -0.3rem 0 1.1rem; }
+  .recent-row[hidden], .extra-section[hidden] { display: none; }
+  .extra-section { margin-top: 2.5rem; border-top: 1px solid var(--border); padding-top: 1.5rem; }
+  .chip-row { display: flex; flex-wrap: wrap; gap: 0.5rem; }
+  .gene-chip {
+    display: inline-flex; align-items: center; text-decoration: none;
+    background: transparent; color: var(--text-dim); border: 1px solid var(--border);
+    font-family: 'JetBrains Mono', monospace; font-weight: 500; font-size: 0.75rem;
+    padding: 0.3rem 0.65rem; border-radius: 4px; cursor: pointer;
   }
-  const result = { loc, summary };
-  cacheSet(key, result);
-  return result;
-}
-
-
-function renderIdeogram(loc, geneSymbol, geneId) {
-  const section = document.getElementById("locationSection");
-  const container = document.getElementById("ideoContainer");
-  const hint = document.getElementById("ideoHint");
-  container.innerHTML = "";
-  hint.textContent = "";
-
-  if (!loc) {
-    section.hidden = true;
-    section.style.display = "none";
-    return;
+  .gene-chip:hover { background: transparent; border-color: var(--accent); color: var(--accent); }
+  .gene-chip .chip-score { margin-left: 0.45rem; opacity: 0.65; font-size: 0.68rem; }
+  .variant-tick {
+    position: absolute; top: -5px; width: 3px; height: 20px; margin-left: -1px; border-radius: 1px;
+    background: #e07a5f; opacity: 0.85; cursor: pointer;
   }
-  if (typeof Ideogram === "undefined") {
-    section.hidden = false;
-    section.style.display = "block";
-    hint.textContent = "Chromosome diagram library failed to load (check your network connection).";
-    return;
+  .variant-tick:hover, .variant-tick:focus { opacity: 1; outline: 2px solid var(--accent); outline-offset: 1px; }
+  .variant-tick.active { background: #ff4d4d; box-shadow: 0 0 0 2px #ff4d4d; opacity: 1; }
+  .variant-more { margin-top: 0.8rem; }
+  .expr-row { margin-bottom: 0.6rem; }
+  .expr-label { font-family: 'JetBrains Mono', monospace; font-size: 0.72rem; color: var(--text-dim); margin-bottom: 0.25rem; }
+  .ext-link { color: var(--accent); text-decoration: none; }
+  .ext-link:hover { text-decoration: underline; }
+
+  /* Jump navigation — minimap rail (wide screens) + floating pill (narrow screens) */
+  .jump-rail {
+    position: fixed; top: 18vh; height: 64vh; width: 16px; z-index: 30;
+    right: max(18px, calc((100vw - 980px) / 4 - 8px));
   }
-
-  section.hidden = false;
-  section.style.display = "block";
-  document.getElementById("ideoLocText").textContent =
-    `Chromosome ${loc.chr}${loc.mapLocation ? " · band " + loc.mapLocation : ""} · ` +
-    `chr${loc.chr}:${loc.start.toLocaleString()}-${loc.stop.toLocaleString()}`;
-
-  const annotation = [{
-    name: geneSymbol,
-    chr: loc.chr,
-    start: loc.start,
-    stop: loc.stop,
-    color: "#ff4d4d"
-  }];
-
-  // Ideogram.js doesn't have a documented click-on-annotation callback, so
-  // after the ideogram loads we manually attach a click handler to the
-  // rendered annotation element to link out to NCBI Gene.
-  function wireClickThrough() {
-    if (!geneId || geneId === "-") return;
-    const annots = container.querySelectorAll('[class*="annot"]');
-    annots.forEach((el) => {
-      el.style.cursor = "pointer";
-      el.addEventListener("click", () => {
-        window.open(`https://www.ncbi.nlm.nih.gov/gene/${geneId}`, "_blank", "noopener");
-      });
-    });
+  .jump-rail[hidden], .jump-pill[hidden], .jp-menu[hidden] { display: none; }
+  .jr-inner { position: relative; height: 100%; }
+  .jr-track {
+    position: absolute; left: 4px; right: 4px; top: 0; bottom: 0; cursor: pointer;
+    background: linear-gradient(var(--border), var(--border)) center / 2px 100% no-repeat;
   }
-
-  // Ideogram lays the chromosomes out at a fixed min-width, which overflows the
-  // card and adds scrollbars. Give the SVG a viewBox so it scales to fit instead.
-  function fitIdeogram() {
-    const svg = container.querySelector("svg");
-    if (!svg) return;
-    let box;
-    try { box = svg.getBBox(); } catch { return; }
-    if (!box || !box.width || !box.height) return;
-    const pad = 8;
-    const x = box.x - pad, y = box.y - pad, w = box.width + pad * 2, h = box.height + pad * 2;
-    svg.setAttribute("viewBox", `${x} ${y} ${w} ${h}`);
-    svg.setAttribute("preserveAspectRatio", "xMidYMin meet");
-    svg.setAttribute("width", "100%");
-    svg.removeAttribute("height");
-    svg.style.minWidth = "0";
-    svg.style.height = "auto";
-    svg.style.aspectRatio = `${w} / ${h}`;
-    const mid = document.getElementById("_ideogramMiddleWrap");
-    if (mid) { mid.style.height = "auto"; mid.style.overflow = "hidden"; }
-    const inner = document.getElementById("_ideogramInnerWrap");
-    if (inner) {
-      inner.style.position = "relative";
-      inner.style.overflow = "visible";
-      inner.style.maxWidth = "none";
-      inner.style.width = "100%";
-    }
+  .jr-fill {
+    position: absolute; left: 7px; top: 0; width: 2px; height: 0; border-radius: 1px; pointer-events: none;
+    background: linear-gradient(to bottom, transparent, var(--accent));
+    transition: height 0.45s cubic-bezier(0.2, 0.8, 0.2, 1);
   }
-
-  try {
-    new Ideogram({
-      container: "#ideoContainer",
-      organism: "human",
-      chrHeight: 300,
-      rotatable: false,
-      annotationsLayout: "overlay",
-      annotationHeight: 6,
-      annotations: annotation,
-      onLoad: () => { fitIdeogram(); wireClickThrough(); }
-    });
-  } catch (e) {
-    console.error("Ideogram render failed", e);
-    hint.textContent = "Couldn't render the chromosome diagram: " + e.message;
-    return;
+  .jr-window {
+    position: absolute; left: 1px; width: 14px; border: 1px solid rgba(232, 169, 74, 0.55);
+    border-radius: 7px; background: rgba(232, 169, 74, 0.07); pointer-events: none;
+    box-shadow: 0 0 12px rgba(232, 169, 74, 0.12);
   }
-
-  hint.textContent = geneId && geneId !== "-"
-    ? `Red mark shows ${geneSymbol}'s position · click it to open the NCBI Gene page`
-    : `Red mark shows ${geneSymbol}'s position on the chromosome`;
-}
-
-
-function renderInfo(fields) {
-  const info = document.getElementById("info");
-  info.innerHTML = fields.map((f, idx) => `
-    <div class="field${f.wide ? ' wide' : ''}${f.collapsible ? ' collapsible' : ''}" ${f.collapsible ? `id="${f.id}"` : ''}>
-      <div class="field-label">
-        ${f.collapsible ? `<button type="button" class="collapsible-toggle" data-target="${f.id}" aria-expanded="false">${f.label}<span class="caret">&#9656;</span></button>` : f.label}
-      </div>
-      <div class="field-value${f.mono ? ' mono' : ''}${f.scroll ? ' scroll' : ''}">${f.value}</div>
-      ${f.detail ? `<div class="ss-detail">${f.detail}</div>` : ''}
-    </div>
-  `).join("");
-}
-
-function toggleCollapsible(id) {
-  const el = document.getElementById(id);
-  const button = el?.querySelector(".collapsible-toggle");
-  if (el) {
-    const open = el.classList.toggle("open");
-    button?.setAttribute("aria-expanded", String(open));
+  .jr-item {
+    position: absolute; left: 0; width: 16px; height: 0;
+    transition: top 0.5s cubic-bezier(0.2, 0.8, 0.2, 1);
   }
-}
-
-function cleanText(t) {
-  if (!t) return "";
-  return t.replace(/\(PubMed:\d+(,\s*PubMed:\d+)*\)/gi, "")
-           .replace(/\[PubMed:\d+\]/gi, "")
-           .replace(/\s{2,}/g, " ")
-           .trim();
-}
-
-function renderLearnLinks(gene, accession, geneId) {
-  const links = [
-    { name: "UniProt", url: `https://www.uniprot.org/uniprotkb/${accession}/entry`, desc: "Full curated protein record" },
-    { name: "AlphaFold DB", url: `https://alphafold.ebi.ac.uk/entry/${accession}`, desc: "Source page for this structure" },
-    { name: "InterPro", url: `https://www.ebi.ac.uk/interpro/search/text/${encodeURIComponent(accession)}/`, desc: "Protein families, domains and features" },
-    { name: "GeneCards", url: `https://www.genecards.org/cgi-bin/carddisp.pl?gene=${encodeURIComponent(gene)}`, desc: "Aggregated gene summary" },
-    { name: "RCSB PDB", url: `https://www.rcsb.org/search?q=${encodeURIComponent(gene)}`, desc: "Experimentally solved structures, if any" },
-    { name: "PubMed", url: `https://pubmed.ncbi.nlm.nih.gov/?term=${encodeURIComponent(gene + " Homo sapiens")}`, desc: "Full literature search" },
-    { name: "Ensembl", url: `https://www.ensembl.org/Homo_sapiens/Gene/Summary?g=${encodeURIComponent(gene)}`, desc: "Genomic context, transcripts, variants" },
-    { name: "STRING", url: `https://string-db.org/network/${encodeURIComponent(gene)}`, desc: "Protein-protein interaction network" }
-  ];
-  if (geneId && geneId !== "-") {
-    links.splice(2, 0, { name: "NCBI Gene", url: `https://www.ncbi.nlm.nih.gov/gene/${geneId}`, desc: "Genomic location, aliases, expression" });
+  .jr-zone { position: absolute; top: -28px; bottom: -28px; left: -120px; right: -16px; cursor: pointer; touch-action: none; }
+  .jump-rail.on-window .jr-zone { cursor: grab; }
+  .jump-rail.dragging .jr-zone { cursor: grabbing; }
+  .jump-rail.dragging, .jump-rail.dragging * { user-select: none; }
+  .jump-rail.on-window .jr-window, .jump-rail.dragging .jr-window {
+    border-color: var(--accent); background: rgba(232, 169, 74, 0.14); box-shadow: 0 0 18px rgba(232, 169, 74, 0.3);
   }
-  document.getElementById("learnEmpty").style.display = "none";
-  document.getElementById("learnGrid").innerHTML = links.map(l => `
-    <a class="learn-card" href="${l.url}" target="_blank" rel="noopener">
-      <div class="learn-name">${l.name}</div>
-      <div class="learn-desc">${l.desc}</div>
-    </a>
-  `).join("");
-}
-
-function computeSecondaryStructureStats() {
-  if (!model) return null;
-  const atoms = model.selectedAtoms({ atom: "CA" });
-  if (atoms.length === 0) return null;
-  let helix = 0, sheet = 0, coil = 0;
-  atoms.forEach(a => {
-    if (a.ss === "h") helix++;
-    else if (a.ss === "s") sheet++;
-    else coil++;
-  });
-  const total = atoms.length;
-  return {
-    helix: ((helix / total) * 100).toFixed(0),
-    sheet: ((sheet / total) * 100).toFixed(0),
-    coil: ((coil / total) * 100).toFixed(0),
-    helixCount: helix,
-    sheetCount: sheet,
-    coilCount: coil,
-    total
-  };
-}
-
-function ssDetailHtml(ss) {
-  if (!ss) return "";
-  const row = (label, color, pct, count) => `
-    <div>${label} &middot; ${pct}% (${count} residues)</div>
-    <div class="ss-bar-row">
-      <div class="ss-bar-track"><div class="ss-bar-fill" style="width:${pct}%;background:${color}"></div></div>
-    </div>`;
-  return `
-    ${row("Helix", "#e8a94a", ss.helix, ss.helixCount)}
-    ${row("Sheet", "#5eaefc", ss.sheet, ss.sheetCount)}
-    ${row("Coil", "#85837a", ss.coil, ss.coilCount)}
-    <div style="margin-top:0.5rem;">Total residues modeled: ${ss.total}</div>
-  `;
-}
-
-async function loadGene() {
-  if (!viewer) { setStatus("Viewer not ready yet, try again in a second.", true); return; }
-  const input = document.getElementById("geneInput");
-  const rawInput = input.value.trim();
-  if (!rawInput) {
-    setStatus("Enter a gene symbol first.", true);
-    input.focus();
-    return;
+  .jr-window { transition: border-color 0.2s, background 0.2s, box-shadow 0.2s; }
+  .jr-dot {
+    pointer-events: none;
+    position: absolute; left: 4px; top: -4px; width: 8px; height: 8px; padding: 0;
+    border-radius: 50%; background: var(--bg); border: 1.5px solid var(--text-dim);
+    cursor: pointer; transition: transform 0.3s cubic-bezier(0.2, 0.8, 0.2, 1), background 0.25s, border-color 0.25s, box-shadow 0.25s;
   }
-
-  const gene = rawInput.toUpperCase().replace(/\s+/g, "");
-  if (!/^[A-Z0-9.-]+$/.test(gene)) {
-    setStatus("Enter a valid gene symbol.", true);
-    return;
+  .jr-item.near .jr-dot { border-color: var(--accent); transform: scale(1.3); }
+  .jr-item.passed .jr-dot { border-color: var(--accent); }
+  .jr-item.active .jr-dot {
+    background: var(--accent); border-color: var(--accent); transform: scale(1.45);
+    box-shadow: 0 0 0 4px rgba(232, 169, 74, 0.15), 0 0 14px rgba(232, 169, 74, 0.45);
   }
-
-  if (activeController) activeController.abort();
-  activeController = new AbortController();
-  const signal = activeController.signal;
-  const requestId = ++requestSequence;
-  currentGeneName = gene;
-  setLoading(true);
-  resetResultPanels();
-  setStatus(`Searching ${gene}…`, false, true);
-  setProgress(0);
-
-  try {
-    const protein = await fetchUniprotAccession(gene, "+AND+organism_id:9606", signal);
-    if (!isCurrentRequest(requestId)) return;
-    if (!protein) {
-      setStatus(`No reviewed UniProt entry found for ${gene}.`, true);
-      return;
-    }
-
-    const accession = protein.primaryAccession;
-    const proteinName = protein.proteinDescription?.recommendedName?.fullName?.value || "Unknown";
-    const length = protein.sequence?.length || 0;
-    currentProteinLength = length;
-    const mass = protein.sequence?.molWeight ? (protein.sequence.molWeight / 1000).toFixed(1) + " kDa" : "-";
-    const functionText = cleanText(protein.comments?.find(c => c.commentType === "FUNCTION")?.texts?.[0]?.value) || "No function summary available.";
-    const diseaseText = cleanText(protein.comments?.find(c => c.commentType === "DISEASE")?.disease?.description) || "No disease association listed.";
-    const synonyms = (protein.genes?.[0]?.synonyms || []).map(s => s.value);
-    const aliases = synonyms.length ? synonyms.join(", ") : "No known aliases listed.";
-    const subcellLocs = (protein.comments?.find(c => c.commentType === "SUBCELLULAR_LOCATION")?.subcellularLocations || [])
-      .map(l => l.location?.value).filter(Boolean);
-    const subcellText = subcellLocs.length ? subcellLocs.join(", ") : "Not annotated.";
-
-    setStatus(`Fetching structure for ${accession}…`, false, true);
-    setProgress(1);
-    const pdbData = await fetchAlphaFoldStructure(accession, signal);
-    if (!isCurrentRequest(requestId)) return;
-    if (!pdbData) {
-      setStatus(`No AlphaFold structure available for ${accession}.`, true);
-      return;
-    }
-
-    currentPdbData = pdbData;
-    viewer.clear();
-    model = viewer.addModel(pdbData, "pdb");
-    applyColoring();
-    viewer.zoomTo();
-    viewer.render();
-
-    viewer.setClickable({}, true, atom => {
-      if (!atom) return;
-      const confidence = atom.b != null ? Number(atom.b).toFixed(1) : "-";
-      document.getElementById("residueBar").innerHTML =
-        `<strong>${escapeHtml(atom.resn)} ${escapeHtml(atom.resi)}</strong> · chain ${escapeHtml(atom.chain || "-")} · confidence (pLDDT): ${confidence}`;
-    });
-
-    const ss = computeSecondaryStructureStats();
-
-    // Variants, partners and expression load in the background, each in its
-    // own section, so a slow or failing API never blocks the main result.
-    loadExtras(gene, accession, length, requestId, signal);
-
-    // The core result is usable even if enrichment APIs fail.
-    let refsHtml = "No linked publications found.";
-    let geneId = "-";
-    let ncbiSummary = "";
-    setStatus("Loading annotations and references…", false, true);
-    setProgress(2);
-
-    try {
-      const fullKey = cacheKey("uniprot-full", accession);
-      let fullData = cacheGet(fullKey);
-      if (!fullData) {
-        const fullRes = await apiFetch(`https://rest.uniprot.org/uniprotkb/${accession}.json`, {}, { signal });
-        fullData = await fullRes.json();
-        cacheSet(fullKey, fullData);
-      }
-      geneId = (fullData.uniProtKBCrossReferences || []).find(x => x.database === "GeneID")?.id || "-";
-      const refs = (fullData.references || []).slice(0, 12).map(r => {
-        const pmid = (r.citationCrossReferences || []).find(x => x.database === "PubMed")?.id;
-        const title = escapeHtml(r.citation?.title || "Untitled");
-        const journal = escapeHtml(r.citation?.journal || "");
-        const year = escapeHtml(r.citation?.publicationDate || "");
-        const titleHtml = pmid
-          ? `<a class="ref-title-link" href="https://pubmed.ncbi.nlm.nih.gov/${pmid}/" target="_blank" rel="noopener">${title}</a>`
-          : `<span class="ref-title-link" style="color:var(--text);">${title}</span>`;
-        const linkLine = pmid ? `<a href="https://pubmed.ncbi.nlm.nih.gov/${pmid}/" target="_blank" rel="noopener">PMID:${pmid} →</a>` : "";
-        return `<div class="ref-item">${titleHtml}<div class="ref-meta">${journal} ${year}</div>${linkLine}</div>`;
-      });
-      if (refs.length) refsHtml = refs.join("");
-    } catch (e) {
-      if (e.name === "AbortError") throw e;
-      console.error("Reference enrichment failed:", e);
-      refsHtml = `<div class="error-note">References temporarily unavailable. The structure and core annotation loaded successfully.</div>`;
-    }
-
-    if (!isCurrentRequest(requestId)) return;
-    setProgress(3);
-    setStatus("Loading protein domains and features…", false, true);
-
-    try {
-      const interProEntries = await fetchInterProAnnotations(accession, signal);
-      if (isCurrentRequest(requestId)) renderInterPro(interProEntries, length);
-    } catch (e) {
-      if (e.name === "AbortError") throw e;
-      console.error("InterPro enrichment failed:", e);
-      const section = document.getElementById("interproSection");
-      section.hidden = false;
-      document.getElementById("interproMeta").textContent = "InterPro annotations are temporarily unavailable.";
-      document.getElementById("domainMap").innerHTML = "";
-      document.getElementById("domainScale").innerHTML = "";
-      document.getElementById("interproList").innerHTML = `<div class="error-note">Couldn't load InterPro annotations. The structure and other gene information are still available.</div>`;
-      document.getElementById("interproHint").textContent = "Retry the search later to fetch InterPro domains and features.";
-    }
-
-    if (!isCurrentRequest(requestId)) return;
-    setProgress(4);
-    setStatus("Loading genomic location…", false, true);
-
-    try {
-      const ncbi = await fetchNcbiGene(geneId, signal);
-      ncbiSummary = ncbi?.summary || "";
-      if (isCurrentRequest(requestId)) renderIdeogram(ncbi?.loc || null, gene, geneId);
-    } catch (e) {
-      if (e.name === "AbortError") throw e;
-      console.error("Genomic location fetch failed:", e);
-      document.getElementById("locationSection").style.display = "block";
-      document.getElementById("ideoContainer").innerHTML = "";
-      document.getElementById("ideoHint").textContent = "Genomic location is temporarily unavailable. The rest of the gene result is still usable.";
-    }
-
-    if (!isCurrentRequest(requestId)) return;
-
-    renderInfo([
-      { label: "Gene", value: `${escapeHtml(gene)} · ${escapeHtml(accession)}`, mono: true },
-      { label: "NCBI Gene ID", value: escapeHtml(geneId), mono: true },
-      { label: "Protein", value: escapeHtml(proteinName) },
-      { label: "Aliases", value: escapeHtml(aliases) },
-      { label: "Subcellular location", value: escapeHtml(subcellText) },
-      { label: "Length / mass", value: `${length} aa · ${escapeHtml(mass)}`, mono: true },
-      { label: "Secondary structure", value: ss ? `${ss.helix}% helix · ${ss.sheet}% sheet · ${ss.coil}% coil · click to expand` : "-", mono: true, collapsible: true, id: "ssField", detail: ssDetailHtml(ss) },
-      ...(ncbiSummary ? [{ label: "Gene summary (NCBI)", value: escapeHtml(ncbiSummary), scroll: true, wide: true }] : []),
-      { label: "Function", value: escapeHtml(functionText), scroll: true, wide: true },
-      { label: "Disease association", value: escapeHtml(diseaseText), wide: true },
-      { label: "Referenced papers", value: refsHtml, scroll: true, wide: true }
-    ]);
-    renderLearnLinks(gene, accession, geneId);
-    setProgress(5);
-    setStatus("Loaded successfully.");
-    addRecent(gene);
-    try { history.replaceState(null, "", `?gene=${encodeURIComponent(gene)}`); } catch { /* ignore */ }
-  } catch (err) {
-    if (err.name === "AbortError") return;
-    console.error(err);
-    setStatus(err.message || "Something went wrong while loading this gene.", true);
-  } finally {
-    if (isCurrentRequest(requestId)) {
-      setLoading(false);
-      activeController = null;
-    }
+  .jr-label {
+    position: absolute; right: 22px; top: 0; transform: translate(8px, -50%);
+    white-space: nowrap; pointer-events: none; opacity: 0;
+    font-family: 'JetBrains Mono', monospace; font-size: 0.62rem; letter-spacing: 0.12em; text-transform: uppercase;
+    color: var(--text-dim); background: var(--bg); padding: 0.15rem 0.4rem; border-radius: 3px;
+    transition: opacity 0.25s, transform 0.3s cubic-bezier(0.2, 0.8, 0.2, 1), color 0.25s;
   }
-}
+  .jr-item.active .jr-label { opacity: 1; transform: translate(0, -50%); color: var(--accent); }
+  .jr-item.near .jr-label, .jr-dot:focus-visible + .jr-label { opacity: 1; transform: translate(0, -50%); color: var(--text); }
+  .jr-item.near.active .jr-label { color: var(--accent); }
+  .jump-rail.has-near .jr-item.active:not(.near) .jr-label { opacity: 0; transform: translate(8px, -50%); }
 
-function escapeHtml(value) {
-  return String(value ?? "").replace(/[&<>"']/g, ch => ({
-    "&":"&amp;", "<":"&lt;", ">":"&gt;", '"':"&quot;", "'":"&#039;"
-  }[ch]));
-}
-
-function applyColoring() {
-  if (!viewer || !model) return;
-  const colorMode = document.getElementById("colorSelect").value;
-  const styleMode = document.getElementById("styleSelect").value;
-
-  viewer.setStyle({}, {});
-
-  let colorSpec;
-  if (colorMode === "confidence") colorSpec = { colorfunc: (atom) => plddtColor(atom.b) };
-  else if (colorMode === "chain") colorSpec = { color: "chain" };
-  else if (colorMode === "secondary") colorSpec = { color: "ssPyMOL" };
-  else colorSpec = { color: "spectrum" };
-
-  if (styleMode === "sphere") {
-    viewer.setStyle({ atom: "CA" }, { sphere: { ...colorSpec, radius: 1.1 } });
-  } else {
-    const styleObj = {};
-    styleObj[styleMode] = colorSpec;
-    viewer.setStyle({}, styleObj);
+  .jump-pill { position: fixed; right: 16px; bottom: 16px; z-index: 30; display: none; }
+  .jp-button {
+    position: relative; overflow: hidden; display: inline-flex; align-items: center; gap: 0.5rem;
+    background: var(--panel); color: var(--text); border: 1px solid var(--border); border-radius: 999px;
+    padding: 0.5rem 0.9rem 0.6rem; font-family: 'JetBrains Mono', monospace; font-weight: 500; font-size: 0.72rem;
+    letter-spacing: 0.08em; text-transform: uppercase; box-shadow: 0 6px 24px rgba(0, 0, 0, 0.5);
   }
-
-  document.getElementById("legend-confidence").style.display = colorMode === "confidence" ? "flex" : "none";
-  document.getElementById("legend-spectrum").style.display = colorMode === "spectrum" ? "flex" : "none";
-  document.getElementById("legend-secondary").style.display = colorMode === "secondary" ? "flex" : "none";
-
-  viewer.render();
-}
-
-function reapplyDomainHighlight() {
-  if (!viewer || !model || !highlightedDomain) return;
-  const sel = { resi: `${highlightedDomain.start}-${highlightedDomain.end}` };
-  const outside = { not: sel };
-  const styleMode = document.getElementById("styleSelect").value;
-  const GREY = "#5c5c5c";
-
-  // applyColoring() has already painted the whole protein in the current
-  // color scheme. Grey out everything outside the domain so the domain keeps
-  // its real colors and the rest of the structure fades to black & white.
-  if (styleMode === "sphere") {
-    viewer.setStyle({ atom: "CA", ...outside }, { sphere: { color: GREY, radius: 1.1 } });
-  } else {
-    viewer.setStyle(outside, { [styleMode]: { color: GREY } });
+  .jp-button:hover { background: var(--panel); border-color: var(--accent); }
+  .jp-dot { width: 7px; height: 7px; border-radius: 50%; background: var(--accent); box-shadow: 0 0 10px var(--accent); animation: jp-pulse 1.8s ease-in-out infinite; }
+  .jp-caret { color: var(--text-dim); font-size: 0.65rem; }
+  .jp-label { display: inline-block; min-width: 5.5em; }
+  .dna { color: var(--text-dim); opacity: 0.75; }
+  .dna-caret {
+    display: inline-block; width: 0; height: 0.95em; vertical-align: -0.12em; margin: 0 1px;
+    border-left: 1.5px solid var(--accent); animation: dna-blink 0.5s steps(1) infinite;
   }
-  // Single residues (variants) are hard to see in cartoon, so show their side chains
-  if (styleMode === "cartoon" && highlightedDomain.end - highlightedDomain.start <= 2) {
-    viewer.addStyle(sel, { stick: { radius: 0.25 } });
+  @keyframes dna-blink { 50% { border-color: transparent; } }
+  .jp-bar {
+    position: absolute; left: 0; bottom: 0; height: 2px; width: 100%; background: var(--accent);
+    transform-origin: left; transform: scaleX(0);
   }
-  viewer.render();
-}
-
-function highlightDomain(entry, fragment, sourceEl) {
-  if (!viewer || !model) return;
-
-  document.querySelectorAll(".domain-bar.active, .interpro-item.active, .variant-tick.active").forEach(el => el.classList.remove("active"));
-
-  const isSame = highlightedDomain
-    && highlightedDomain.accession === entry.accession
-    && highlightedDomain.start === fragment.start
-    && highlightedDomain.end === fragment.end;
-
-  applyColoring(); // clears any previous highlight overlay, reapplies base style
-
-  if (isSame) {
-    highlightedDomain = null;
-    document.getElementById("residueBar").textContent = "Click any residue in the structure to inspect it.";
-    viewer.zoomTo({}, 600); // fly back out to the whole protein
-    viewer.render();
-    return;
+  .jp-menu {
+    position: absolute; right: 0; bottom: calc(100% + 8px); min-width: 170px; display: flex; flex-direction: column;
+    background: var(--panel); border: 1px solid var(--border); border-radius: 8px; padding: 0.35rem;
+    box-shadow: 0 10px 30px rgba(0, 0, 0, 0.55);
   }
-
-  highlightedDomain = { accession: entry.accession, start: fragment.start, end: fragment.end };
-  reapplyDomainHighlight();
-
-  document.querySelectorAll(`[data-domain-key="${entry.accession}:${fragment.start}-${fragment.end}"]`)
-    .forEach(el => el.classList.add("active"));
-
-  const span = fragment.end - fragment.start + 1;
-  const total = Number(currentProteinLength) || 0;
-  const coversMost = total > 0 && span / total > 0.8;
-
-  document.getElementById("residueBar").innerHTML =
-    `<strong>${escapeHtml(entry.name)}</strong> · ${escapeHtml(entry.displayId ?? entry.accession)} · ` +
-    (fragment.start === fragment.end ? `residue ${fragment.start}` : `residues ${fragment.start}-${fragment.end}`) + ` in color, rest greyed out` +
-    (coversMost ? ` · note: this entry spans ~${Math.round((span / total) * 100)}% of the protein` : "") +
-    ` · click again to clear`;
-
-  // Fly the camera to the highlighted residues
-  const zoomPad = fragment.end - fragment.start < 12 ? 6 : 0;
-  viewer.zoomTo({ resi: `${Math.max(1, fragment.start - zoomPad)}-${fragment.end + zoomPad}` }, 600);
-  viewer.render();
-
-  document.getElementById("viewer")?.scrollIntoView({ behavior: "smooth", block: "center" });
-}
-
-function toggleSpin() {
-  spinning = document.getElementById("spinToggle").checked;
-  if (viewer) viewer.spin(spinning ? "y" : false);
-}
-
-function resetView() { if (viewer && model) { viewer.zoomTo(); viewer.render(); } }
-function zoomIn() { if (viewer && model) { viewer.zoom(1.2, 200); viewer.render(); } }
-function zoomOut() { if (viewer && model) { viewer.zoom(0.8, 200); viewer.render(); } }
-
-function plddtColor(b) {
-  if (b > 90) return "#0053D6";
-  if (b > 70) return "#65CBF3";
-  if (b > 50) return "#FFDB13";
-  return "#FF7D45";
-}
-
-function downloadPDB() {
-  if (!currentPdbData) return;
-  const blob = new Blob([currentPdbData], { type: "chemical/x-pdb" });
-  const a = document.createElement("a");
-  a.href = URL.createObjectURL(blob);
-  a.download = `${currentGeneName || "structure"}.pdb`;
-  a.click();
-}
-
-function downloadPNG() {
-  if (!viewer || !model) return;
-  const uri = viewer.pngURI();
-  const a = document.createElement("a");
-  a.href = uri;
-  a.download = `${currentGeneName || "structure"}.png`;
-  a.click();
-}
-
-
-/* ---------------------------------------------------------------------------
-   Extra sections: recent searches, disease variants, partners, expression
---------------------------------------------------------------------------- */
-
-function searchGene(name) {
-  document.getElementById("geneInput").value = name;
-  window.scrollTo({ top: 0, behavior: "smooth" });
-  loadGene();
-}
-
-function getRecent() {
-  try {
-    const list = JSON.parse(localStorage.getItem(RECENT_KEY) || "[]");
-    return Array.isArray(list) ? list.filter(g => typeof g === "string") : [];
-  } catch { return []; }
-}
-
-function addRecent(gene) {
-  const list = [gene, ...getRecent().filter(g => g !== gene)].slice(0, MAX_RECENT);
-  try { localStorage.setItem(RECENT_KEY, JSON.stringify(list)); } catch { /* ignore */ }
-  renderRecent();
-}
-
-function renderRecent() {
-  const row = document.getElementById("recentRow");
-  if (!row) return;
-  const list = getRecent();
-  row.hidden = list.length === 0;
-  row.innerHTML = list.length
-    ? `<span class="control-label">RECENT</span>` +
-      list.map(g => `<button type="button" class="gene-chip" data-gene="${escapeHtml(g)}">${escapeHtml(g)}</button>`).join("")
-    : "";
-}
-
-function resetExtraSections() {
-  ["variantSection", "partnerSection", "exprSection"].forEach(id => {
-    const el = document.getElementById(id);
-    if (el) el.hidden = true;
-  });
-  ["variantMeta", "variantHint", "partnerMeta", "exprMeta"].forEach(id => {
-    const el = document.getElementById(id);
-    if (el) el.textContent = "";
-  });
-  ["variantMap", "variantScale", "variantList", "partnerList", "exprList", "exprHint"].forEach(id => {
-    const el = document.getElementById(id);
-    if (el) el.innerHTML = "";
-  });
-  const more = document.getElementById("variantMore");
-  if (more) { more.hidden = true; more.dataset.expanded = "false"; }
-}
-
-function loadExtras(gene, accession, length, requestId, signal) {
-  runExtra("variant", "disease variants", () => fetchDiseaseVariants(accession, signal), v => renderVariants(v, length), requestId);
-  runExtra("partner", "interaction partners", () => fetchPartners(gene, signal), renderPartners, requestId);
-  runExtra("expr", "tissue expression", () => fetchExpression(gene, signal), rows => renderExpression(rows, gene), requestId);
-}
-
-async function runExtra(prefix, label, fetcher, renderer, requestId) {
-  const section = document.getElementById(`${prefix}Section`);
-  const meta = document.getElementById(`${prefix}Meta`);
-  if (!section || !meta) return;
-  section.hidden = false;
-  meta.textContent = `Loading ${label}…`;
-  try {
-    const data = await fetcher();
-    if (isCurrentRequest(requestId)) renderer(data);
-  } catch (e) {
-    if (e.name === "AbortError" || !isCurrentRequest(requestId)) return;
-    console.error(`${label} failed:`, e);
-    meta.textContent = "";
-    const target = document.getElementById(prefix === "partner" ? "partnerList" : `${prefix}List`);
-    if (target) target.innerHTML = `<div class="error-note">Couldn't load ${label} right now. The rest of the gene result is unaffected.</div>`;
+  .jp-option {
+    background: transparent; color: var(--text-dim); text-align: left; padding: 0.45rem 0.6rem; border-radius: 4px;
+    font-family: 'JetBrains Mono', monospace; font-weight: 500; font-size: 0.72rem; letter-spacing: 0.08em; text-transform: uppercase;
   }
-}
+  .jp-option:hover { background: rgba(232, 169, 74, 0.08); color: var(--text); }
+  .jp-option.active { color: var(--accent); }
+  @keyframes jp-pulse { 0%, 100% { opacity: 0.55; } 50% { opacity: 1; } }
 
-/* ---- Disease variants (EBI Proteins API: UniProt + ClinVar) ---- */
-
-async function fetchDiseaseVariants(accession, signal) {
-  const key = cacheKey("variants", accession);
-  const cached = cacheGet(key);
-  if (cached) return cached;
-
-  const res = await apiFetch(
-    `https://www.ebi.ac.uk/proteins/api/variation/${encodeURIComponent(accession)}`,
-    { headers: { Accept: "application/json" } },
-    { signal }
-  );
-  const data = await res.json();
-  const byChange = new Map();
-
-  (data.features || []).forEach(f => {
-    const pos = Number(f.begin);
-    if (!Number.isFinite(pos) || pos < 1) return;
-
-    const sigs = (f.clinicalSignificances || [])
-      .map(c => String(c.type || ""))
-      .filter(t => /pathogenic/i.test(t) && !/conflicting|benign/i.test(t));
-    const diseases = (f.association || [])
-      .filter(a => a.disease && a.name)
-      .map(a => String(a.name));
-    if (!sigs.length && !diseases.length) return;
-
-    const wt = String(f.wildType || "");
-    const mt = String(f.alternativeSequence ?? f.mutatedType ?? "");
-    const rs = (f.xrefs || []).map(x => String(x.id || "")).find(id => /^rs\d+$/i.test(id)) || "";
-    const k = `${pos}:${wt}>${mt}`;
-
-    const v = byChange.get(k) || { pos, wt, mt, sigs: new Set(), diseases: new Set(), rs: "" };
-    sigs.forEach(t => v.sigs.add(t));
-    diseases.forEach(d => v.diseases.add(d));
-    if (!v.rs && rs) v.rs = rs;
-    byChange.set(k, v);
-  });
-
-  const variants = [...byChange.values()].map(v => {
-    const sigs = [...v.sigs];
-    let significance = "Disease-associated (UniProt)";
-    if (sigs.some(t => /^pathogenic$/i.test(t.trim()))) significance = "Pathogenic";
-    else if (sigs.some(t => /likely pathogenic/i.test(t))) significance = "Likely pathogenic";
-    else if (sigs.length) significance = sigs[0];
-    return { pos: v.pos, wt: v.wt, mt: v.mt, rs: v.rs, significance, diseases: [...v.diseases] };
-  }).sort((a, b) => a.pos - b.pos);
-
-  cacheSet(key, variants);
-  return variants;
-}
-
-function variantLabel(v) {
-  const short = s => (s.length > 4 ? s.slice(0, 4) + "…" : s);
-  return `${short(v.wt) || "?"}${v.pos}${short(v.mt) || "?"}`;
-}
-
-function highlightVariant(v, el) {
-  const label = variantLabel(v);
-  highlightDomain(
-    {
-      accession: `VAR-${v.pos}-${v.wt}-${v.mt}`,
-      displayId: v.rs || v.significance,
-      name: v.diseases[0] ? `${label} · ${v.diseases[0]}` : label
-    },
-    { start: v.pos, end: v.pos },
-    el
-  );
-}
-
-function renderVariants(variants, proteinLength) {
-  const meta = document.getElementById("variantMeta");
-  const map = document.getElementById("variantMap");
-  const scale = document.getElementById("variantScale");
-  const list = document.getElementById("variantList");
-  const hint = document.getElementById("variantHint");
-  map.innerHTML = "";
-  scale.innerHTML = "";
-  list.innerHTML = "";
-  hint.textContent = "";
-
-  if (!variants?.length) {
-    map.style.display = "none";
-    meta.textContent = "No pathogenic or disease-associated variants are listed for this protein.";
-    return;
+  @media (max-width: 1340px) {
+    .jump-rail { display: none !important; }
+    .jump-pill:not([hidden]) { display: block; }
   }
-  map.style.display = "";
-
-  const length = Number(proteinLength) || Math.max(1, ...variants.map(v => v.pos));
-  const positions = new Set(variants.map(v => v.pos)).size;
-  meta.textContent = `${variants.length} pathogenic / disease-associated variant${variants.length === 1 ? "" : "s"} at ${positions} position${positions === 1 ? "" : "s"} · sources: UniProt, ClinVar`;
-
-  const track = document.createElement("div");
-  track.className = "domain-track";
-  map.appendChild(track);
-
-  variants.forEach(v => {
-    const tick = document.createElement("div");
-    tick.className = "variant-tick";
-    tick.style.left = `${Math.max(0, Math.min(100, ((v.pos - 0.5) / length) * 100))}%`;
-    tick.dataset.domainKey = `VAR-${v.pos}-${v.wt}-${v.mt}:${v.pos}-${v.pos}`;
-    tick.tabIndex = 0;
-    tick.setAttribute("role", "button");
-    tick.title = `${variantLabel(v)} · ${v.significance}${v.diseases[0] ? " · " + v.diseases[0] : ""}`;
-    tick.setAttribute("aria-label", `${tick.title}. Click to show on the 3D structure.`);
-    tick.addEventListener("click", () => highlightVariant(v, tick));
-    tick.addEventListener("keydown", e => {
-      if (e.key === "Enter" || e.key === " ") { e.preventDefault(); highlightVariant(v, tick); }
-    });
-    track.appendChild(tick);
-  });
-
-  const s1 = document.createElement("span"); s1.textContent = "1 aa";
-  const s2 = document.createElement("span"); s2.textContent = `${length} aa`;
-  scale.append(s1, s2);
-
-  const cards = variants.slice(0, MAX_VARIANT_CARDS);
-  cards.forEach((v, i) => {
-    const item = document.createElement("div");
-    item.className = "interpro-item clickable" + (i >= VARIANTS_COLLAPSED ? " variant-extra" : "");
-    item.hidden = i >= VARIANTS_COLLAPSED;
-    item.tabIndex = 0;
-    item.setAttribute("role", "button");
-    item.dataset.domainKey = `VAR-${v.pos}-${v.wt}-${v.mt}:${v.pos}-${v.pos}`;
-    const rsLink = v.rs
-      ? `<a href="https://www.ncbi.nlm.nih.gov/snp/${encodeURIComponent(v.rs)}" target="_blank" rel="noopener">${escapeHtml(v.rs)}</a>`
-      : `<span class="interpro-type">no rsID</span>`;
-    item.innerHTML = `
-      <div class="interpro-item-head">
-        ${rsLink}
-        <span class="interpro-type">${escapeHtml(v.significance)}</span>
-      </div>
-      <div class="interpro-name">${escapeHtml(variantLabel(v))}${v.diseases.length ? " · " + escapeHtml(v.diseases.join("; ")) : ""}</div>
-      <div class="interpro-range">residue ${v.pos}</div>
-    `;
-    item.addEventListener("click", e => {
-      if (e.target.closest("a")) return;
-      highlightVariant(v, item);
-    });
-    item.addEventListener("keydown", e => {
-      if (e.key === "Enter" || e.key === " ") { e.preventDefault(); highlightVariant(v, item); }
-    });
-    list.appendChild(item);
-  });
-
-  const more = document.getElementById("variantMore");
-  if (more) {
-    more.hidden = cards.length <= VARIANTS_COLLAPSED;
-    more.dataset.expanded = "false";
-    more.dataset.count = String(cards.length);
-    more.textContent = `See more (${cards.length - VARIANTS_COLLAPSED} more)`;
+  @media (prefers-reduced-motion: reduce) {
+    .jr-fill, .jr-item, .jr-dot, .jr-label { transition: none; }
+    .jp-dot, .dna-caret { animation: none; }
   }
-
-  hint.textContent = (variants.length > MAX_VARIANT_CARDS
-    ? `Cards list the first ${MAX_VARIANT_CARDS} of ${variants.length} by position · every variant is marked on the track · `
-    : "") + "Click a tick or card to show that residue on the 3D structure.";
-}
-
-function toggleVariantCards() {
-  const more = document.getElementById("variantMore");
-  if (!more) return;
-  const expand = more.dataset.expanded !== "true";
-  document.querySelectorAll("#variantList .variant-extra").forEach(el => { el.hidden = !expand; });
-  more.dataset.expanded = String(expand);
-  const hiddenCount = Number(more.dataset.count || 0) - VARIANTS_COLLAPSED;
-  more.textContent = expand ? "See less" : `See more (${hiddenCount} more)`;
-  if (!expand) document.getElementById("variantSection")?.scrollIntoView({ behavior: "smooth", block: "start" });
-}
-
-/* ---- Interaction partners (STRING) ---- */
-
-async function fetchPartners(gene, signal) {
-  const key = cacheKey("string", gene);
-  const cached = cacheGet(key);
-  if (cached) return cached;
-
-  const url = `https://string-db.org/api/json/interaction_partners?identifiers=${encodeURIComponent(gene)}&species=9606&limit=12&caller_identity=gene-explorer`;
-  const res = await apiFetch(url, {}, { signal });
-  const data = await res.json();
-  const seen = new Set();
-  const partners = (Array.isArray(data) ? data : [])
-    .map(r => ({ name: String(r.preferredName_B || ""), score: Number(r.score) }))
-    .filter(p => p.name && p.name.toUpperCase() !== gene && Number.isFinite(p.score))
-    .sort((a, b) => b.score - a.score)
-    .filter(p => (seen.has(p.name) ? false : seen.add(p.name)))
-    .slice(0, 10);
-
-  cacheSet(key, partners);
-  return partners;
-}
-
-function renderPartners(partners) {
-  const meta = document.getElementById("partnerMeta");
-  const list = document.getElementById("partnerList");
-  list.innerHTML = "";
-  if (!partners?.length) {
-    meta.textContent = "No interaction partners found in STRING for this gene.";
-    return;
-  }
-  meta.textContent = "Top functional partners from STRING (combined score 0–1) · click one to open it in a new tab";
-  const base = window.location.pathname;
-  list.innerHTML = partners.map(p =>
-    `<a class="gene-chip" href="${base}?gene=${encodeURIComponent(p.name)}" target="_blank" rel="noopener" title="STRING combined score ${p.score.toFixed(3)}">` +
-    `${escapeHtml(p.name)}<span class="chip-score">${p.score.toFixed(2)}</span></a>`
-  ).join("");
-}
-
-/* ---- Tissue expression (GTEx) ---- */
-
-async function fetchExpression(gene, signal) {
-  const key = cacheKey("gtex", gene);
-  const cached = cacheGet(key);
-  if (cached) return cached;
-
-  const refRes = await apiFetch(
-    `https://gtexportal.org/api/v2/reference/gene?geneId=${encodeURIComponent(gene)}`,
-    { headers: { Accept: "application/json" } },
-    { signal }
-  );
-  const refData = await refRes.json();
-  const gencodeId = (refData.data || []).find(g => String(g.geneSymbol || "").toUpperCase() === gene)?.gencodeId
-    || refData.data?.[0]?.gencodeId;
-  if (!gencodeId) { cacheSet(key, []); return []; }
-
-  const expRes = await apiFetch(
-    `https://gtexportal.org/api/v2/expression/medianGeneExpression?gencodeId=${encodeURIComponent(gencodeId)}&datasetId=gtex_v8`,
-    { headers: { Accept: "application/json" } },
-    { signal }
-  );
-  const expData = await expRes.json();
-  const rows = (expData.data || [])
-    .map(r => ({
-      tissue: String(r.tissueSiteDetailId || "").replace(/_+/g, " ").replace(/\s+-\s+/g, " – ").trim(),
-      median: Number(r.median)
-    }))
-    .filter(r => r.tissue && Number.isFinite(r.median))
-    .sort((a, b) => b.median - a.median);
-
-  cacheSet(key, rows);
-  return rows;
-}
-
-function renderExpression(rows, gene) {
-  const meta = document.getElementById("exprMeta");
-  const list = document.getElementById("exprList");
-  const hint = document.getElementById("exprHint");
-  list.innerHTML = "";
-  hint.innerHTML = "";
-  if (!rows?.length) {
-    meta.textContent = "No GTEx expression data found for this gene.";
-    return;
-  }
-  const top = rows.slice(0, 10);
-  const max = Math.max(...top.map(r => r.median), 0.0001);
-  meta.textContent = `Median expression across ${rows.length} GTEx tissues (TPM) · top ${top.length} shown`;
-  list.innerHTML = top.map(r => `
-    <div class="expr-row">
-      <div class="expr-label">${escapeHtml(r.tissue)} · ${r.median.toFixed(1)} TPM</div>
-      <div class="ss-bar-track"><div class="ss-bar-fill" style="width:${((r.median / max) * 100).toFixed(1)}%;background:var(--accent)"></div></div>
-    </div>
-  `).join("");
-  hint.innerHTML = `Full profile: <a class="ext-link" href="https://gtexportal.org/home/gene/${encodeURIComponent(gene)}" target="_blank" rel="noopener">GTEx Portal →</a>`;
-}
-
-
-/* ---------------------------------------------------------------------------
-   Jump navigation: a live minimap rail in the right margin (wide screens)
-   and a floating section pill (narrow screens). Dots sit at each section's
-   real position on the page and re-flow as sections load; the outlined
-   window shows exactly which slice of the page is on screen.
---------------------------------------------------------------------------- */
-
-(function initJumpNav() {
-  const SECTIONS = [
-    ["viewer", "Structure"],
-    ["info", "Overview"],
-    ["interproSection", "Domains"],
-    ["locationSection", "Location"],
-    ["variantSection", "Variants"],
-    ["partnerSection", "Partners"],
-    ["exprSection", "Expression"],
-    [".learn-section", "Read more"]
-  ];
-  const MIN_GAP = 22;
-  const reduceMotion = window.matchMedia?.("(prefers-reduced-motion: reduce)").matches;
-
-  let rail, railInner, fill, win, zone, pill, pillLabel, pillBar, menu;
-  let nearItem = null;
-  let drag = null;
-  const NEAR_PX = 36;      // how close (vertically) the cursor must be to a dot to reveal its name
-  let items = [];
-  let itemsKey = "";
-  let activeSel = null;
-  let ticking = false;
-  let layoutQueued = false;
-
-  // DNA "decode" effect: the label starts as a flickering A/T/G/C strand, then
-  // types itself out left to right into the section name.
-  const BASES = "ATGC";
-  const decoding = new WeakMap();
-  function decode(el, text) {
-    if (!el) return;
-    const prev = decoding.get(el);
-    if (prev) clearTimeout(prev);
-    if (reduceMotion) { el.textContent = text; return; }
-    const HOLD = 160;   // ms of pure DNA before typing starts
-    const PER = 42;     // ms per typed letter
-    const FLICKER = 55; // ms between base reshuffles
-    const start = performance.now();
-    let lastShuffle = -1, strand = "";
-    const tick = () => {
-      const t = performance.now() - start;
-      const typed = t < HOLD ? 0 : Math.min(text.length, Math.floor((t - HOLD) / PER) + 1);
-      const shuffle = Math.floor(t / FLICKER);
-      if (shuffle !== lastShuffle) {
-        lastShuffle = shuffle;
-        strand = Array.from(text, ch => (ch === " " ? " " : BASES[(Math.random() * 4) | 0])).join("");
-      }
-      if (typed >= text.length) {
-        el.textContent = text;
-        decoding.delete(el);
-        return;
-      }
-      el.innerHTML = `${escapeHtml(text.slice(0, typed))}<span class="dna-caret"></span><span class="dna">${strand.slice(typed)}</span>`;
-      decoding.set(el, setTimeout(tick, 30));
-    };
-    tick();
-  }
-
-  const find = sel => (sel.startsWith(".") ? document.querySelector(sel) : document.getElementById(sel));
-  const isShown = node => node && !node.hidden && node.getClientRects().length > 0 && node.getBoundingClientRect().height > 0;
-  const docHeight = () => Math.max(document.documentElement.scrollHeight, 1);
-
-  function build() {
-    rail = document.createElement("nav");
-    rail.className = "jump-rail";
-    rail.setAttribute("aria-label", "Jump to section");
-    rail.hidden = true;
-    rail.innerHTML = `<div class="jr-inner"><div class="jr-track"></div><div class="jr-fill"></div><div class="jr-window"></div><div class="jr-zone"></div></div>`;
-    railInner = rail.querySelector(".jr-inner");
-    fill = rail.querySelector(".jr-fill");
-    win = rail.querySelector(".jr-window");
-    zone = rail.querySelector(".jr-zone");
-    wireZone();
-
-    pill = document.createElement("div");
-    pill.className = "jump-pill";
-    pill.hidden = true;
-    pill.innerHTML = `
-      <div class="jp-menu" hidden></div>
-      <button type="button" class="jp-button" aria-haspopup="true" aria-expanded="false" aria-label="Jump to section">
-        <span class="jp-dot"></span><span class="jp-label">Structure</span><span class="jp-caret">&#9662;</span>
-        <span class="jp-bar"></span>
-      </button>`;
-    menu = pill.querySelector(".jp-menu");
-    pillLabel = pill.querySelector(".jp-label");
-    pillBar = pill.querySelector(".jp-bar");
-    const pillButton = pill.querySelector(".jp-button");
-    pillButton.addEventListener("click", e => {
-      e.stopPropagation();
-      menu.hidden = !menu.hidden;
-      pillButton.setAttribute("aria-expanded", String(!menu.hidden));
-    });
-    document.addEventListener("click", e => {
-      if (!pill.contains(e.target)) { menu.hidden = true; pillButton.setAttribute("aria-expanded", "false"); }
-    });
-    document.addEventListener("keydown", e => {
-      if (e.key === "Escape") { menu.hidden = true; pillButton.setAttribute("aria-expanded", "false"); }
-    });
-
-    document.body.append(rail, pill);
-  }
-
-  /* Pointer handling for the whole rail area: the nearest dot's name appears as
-     soon as the cursor is anywhere close; the glowing window can be dragged
-     like a scrollbar; a click jumps to the nearest section (or to that point). */
-  function railY(e) { return e.clientY - railInner.getBoundingClientRect().top; }
-
-  function nearest(y, maxDist = NEAR_PX) {
-    let best = null, bestD = Infinity;
-    items.forEach(it => { const d = Math.abs(it.y - y); if (d < bestD) { bestD = d; best = it; } });
-    return bestD <= maxDist ? best : null;
-  }
-
-  function onWindow(y) {
-    const top = parseFloat(win.style.top) || 0;
-    const h = parseFloat(win.style.height) || 0;
-    return y >= top - 6 && y <= top + h + 6;
-  }
-
-  function setNear(it) {
-    if (it === nearItem) return;
-    nearItem?.item.classList.remove("near");
-    nearItem = it;
-    rail.classList.toggle("has-near", !!it);
-    if (it) {
-      it.item.classList.add("near");
-      decode(it.labelEl, it.label);
-    }
-  }
-
-  function wireZone() {
-    zone.addEventListener("pointermove", e => {
-      const y = railY(e);
-      if (drag) {
-        const dy = e.clientY - drag.startY;
-        if (Math.abs(dy) > 3) drag.moved = true;
-        if (drag.moved && drag.grab) {
-          const railH = railInner.clientHeight || 1;
-          window.scrollTo({ top: drag.startScroll + dy * (docHeight() / railH), behavior: "auto" });
-        }
-        if (drag.grab) return;
-      }
-      setNear(nearest(y));
-      rail.classList.toggle("on-window", onWindow(y));
-    });
-    zone.addEventListener("pointerleave", () => {
-      if (drag) return;
-      setNear(null);
-      rail.classList.remove("on-window");
-    });
-    zone.addEventListener("pointerdown", e => {
-      if (e.button !== 0) return;
-      const y = railY(e);
-      drag = { startY: e.clientY, startScroll: window.scrollY, moved: false, grab: onWindow(y) };
-      zone.setPointerCapture(e.pointerId);
-      if (drag.grab) rail.classList.add("dragging");
-      e.preventDefault();
-    });
-    const end = e => {
-      if (!drag) return;
-      const y = railY(e);
-      if (!drag.moved) {
-        const it = nearest(y, 16);
-        if (it) go(it);
-        else {
-          const railH = railInner.clientHeight || 1;
-          const frac = Math.min(1, Math.max(0, y / railH));
-          window.scrollTo({ top: frac * docHeight() - window.innerHeight / 2, behavior: reduceMotion ? "auto" : "smooth" });
-        }
-      }
-      drag = null;
-      rail.classList.remove("dragging");
-      try { zone.releasePointerCapture(e.pointerId); } catch { /* ignore */ }
-    };
-    zone.addEventListener("pointerup", end);
-    zone.addEventListener("pointercancel", end);
-  }
-
-  function go(it) {
-    const top = it.node.getBoundingClientRect().top + window.scrollY - 20;
-    window.scrollTo({ top, behavior: reduceMotion ? "auto" : "smooth" });
-    menu.hidden = true;
-  }
-
-  function layout() {
-    layoutQueued = false;
-    const ready = typeof model !== "undefined" && model !== null;
-    rail.hidden = !ready;
-    pill.hidden = !ready;
-    if (!ready) { menu.hidden = true; return; }
-
-    const found = SECTIONS
-      .map(([sel, label]) => ({ sel, label, node: find(sel) }))
-      .filter(s => isShown(s.node));
-    const key = found.map(s => s.sel).join("|");
-
-    if (key !== itemsKey) {
-      itemsKey = key;
-      railInner.querySelectorAll(".jr-item").forEach(n => n.remove());
-      nearItem = null;
-      rail.classList.remove("has-near");
-      menu.innerHTML = "";
-      items = found.map(s => {
-        const item = document.createElement("div");
-        item.className = "jr-item";
-        item.innerHTML = `<button type="button" class="jr-dot" aria-label="Jump to ${s.label}"></button><span class="jr-label">${s.label}</span>`;
-        const dot = item.querySelector(".jr-dot");
-        const label = item.querySelector(".jr-label");
-        dot.addEventListener("focus", () => decode(label, s.label));
-        railInner.appendChild(item);
-
-        const option = document.createElement("button");
-        option.type = "button";
-        option.className = "jp-option";
-        option.textContent = s.label;
-        menu.appendChild(option);
-
-        const it = { ...s, item, dot, labelEl: label, option, top: 0, y: 0 };
-        dot.addEventListener("click", () => go(it));
-        option.addEventListener("click", () => go(it));
-        return it;
-      });
-      activeSel = null;
-    } else {
-      items.forEach((it, i) => { it.node = found[i].node; });
-    }
-
-    // Stretch the hover zone left into the empty margin, but never over the content
-    const page = document.querySelector(".page");
-    if (page && !rail.hidden) {
-      const gap = rail.getBoundingClientRect().left - page.getBoundingClientRect().right;
-      zone.style.left = `-${Math.round(Math.min(140, Math.max(24, gap - 16)))}px`;
-    }
-
-    const docH = docHeight();
-    const railH = railInner.clientHeight || 1;
-    let last = -Infinity;
-    items.forEach(it => {
-      it.top = it.node.getBoundingClientRect().top + window.scrollY;
-      const y = Math.min(railH, Math.max((it.top / docH) * railH, last + MIN_GAP));
-      it.y = y;
-      last = y;
-      it.item.style.top = `${y}px`;
-    });
-    update();
-  }
-
-  function update() {
-    ticking = false;
-    if (rail.hidden || !items.length) return;
-    const docH = docHeight();
-    const railH = railInner.clientHeight || 1;
-    const y = window.scrollY;
-    const vh = window.innerHeight;
-
-    win.style.top = `${(y / docH) * railH}px`;
-    win.style.height = `${Math.max(12, (vh / docH) * railH)}px`;
-
-    // Active section = the one taking up the most of the screen right now
-    let current = items[0], bestVisible = -1;
-    items.forEach((it, i) => {
-      const end = i + 1 < items.length ? items[i + 1].top : docH;
-      const visible = Math.min(end, y + vh) - Math.max(it.top, y);
-      if (visible > bestVisible) { bestVisible = visible; current = it; }
-    });
-    if (y + vh >= docH - 4) current = items[items.length - 1];
-
-    fill.style.height = `${current.y}px`;
-    items.forEach(it => {
-      it.item.classList.toggle("active", it === current);
-      it.item.classList.toggle("passed", it.top < current.top);
-      it.option.classList.toggle("active", it === current);
-    });
-
-    const progress = Math.min(1, Math.max(0, y / Math.max(1, docH - vh)));
-    pillBar.style.transform = `scaleX(${progress})`;
-
-    if (current.sel !== activeSel) {
-      activeSel = current.sel;
-      decode(current.labelEl, current.label);
-      if (!pill.hidden) decode(pillLabel, current.label);
-    }
-  }
-
-  const queueUpdate = () => { if (!ticking) { ticking = true; requestAnimationFrame(update); } };
-  const queueLayout = () => { if (!layoutQueued) { layoutQueued = true; requestAnimationFrame(layout); } };
-
-  window.addEventListener("load", () => {
-    build();
-    window.addEventListener("scroll", queueUpdate, { passive: true });
-    window.addEventListener("resize", queueLayout);
-    const page = document.querySelector(".page");
-    if (page) {
-      if ("ResizeObserver" in window) new ResizeObserver(queueLayout).observe(page);
-      new MutationObserver(queueLayout).observe(page, { attributes: true, attributeFilter: ["hidden", "style"], subtree: true, childList: true });
-    }
-    queueLayout();
-  });
-})();
