@@ -391,7 +391,7 @@
   .hs-track {
     position: absolute; left: 6px; top: 0; bottom: 0; width: 2px; border-radius: 1px; background: var(--border);
   }
-  .hs-marks { position: absolute; inset: 0; pointer-events: none; }
+  .hs-marks { position: absolute; inset: 0; pointer-events: none; overflow: hidden; }
   .hs-domain { position: absolute; left: 5px; width: 4px; border-radius: 2px; background: rgba(232, 169, 74, 0.45); }
   .hs-variant { position: absolute; left: 3px; width: 8px; height: 1.5px; margin-top: -0.75px; background: #e07a5f; opacity: 0.8; }
   .hs-thumb {
