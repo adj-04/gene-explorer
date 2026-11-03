@@ -358,7 +358,7 @@
   .helix-stage { height: 100%; }
   .helix canvas { display: block; width: 100%; height: 100%; }
   .helix-tip {
-    position: absolute; left: 0; top: calc(100% + 12px);
+    position: absolute; left: 0; top: calc(100% + 30px);
     width: max-content; max-width: calc((100vw - 980px) / 4 + 28px);
     font-family: 'JetBrains Mono', monospace; font-size: 0.62rem; letter-spacing: 0.06em;
   }
@@ -367,9 +367,31 @@
   .helix-tip-main.accent { color: var(--accent); }
   .helix-tip-sub { color: var(--text-dim); opacity: 0.7; margin-top: 0.2rem; }
   .helix-legend {
-    position: absolute; left: 0; top: -1.6rem; display: flex; gap: 0.55rem;
+    position: absolute; left: 0; top: calc(100% + 66px); display: flex; gap: 0.55rem;
     font-family: 'JetBrains Mono', monospace; font-size: 0.65rem; font-weight: 500;
   }
   .helix-legend[hidden] { display: none; }
   @media (max-width: 1340px) { .helix { display: none; } }
   .domain-map.helix-linked { cursor: crosshair; }
+  .helix-nav {
+    position: absolute; left: calc(100% + 6px); top: 50%; transform: translateY(-50%);
+    display: flex; flex-direction: column; gap: 6px;
+  }
+  .helix-btn {
+    width: 22px; height: 22px; padding: 0; border-radius: 50%;
+    display: inline-flex; align-items: center; justify-content: center;
+    background: var(--panel); color: var(--text-dim); border: 1px solid var(--border);
+    font-size: 0.55rem; font-weight: 500; line-height: 1; touch-action: none;
+    transition: border-color 0.15s, color 0.15s, box-shadow 0.15s;
+  }
+  .helix-btn:hover:not(:disabled) { background: var(--panel); border-color: var(--accent); color: var(--accent); box-shadow: 0 0 10px rgba(232, 169, 74, 0.25); }
+  .helix-btn[hidden] { display: none; }
+  .helix-btn:disabled, .helix-btn:disabled:hover { background: var(--panel); color: var(--text-dim); border-color: var(--border); box-shadow: none; opacity: 0.35; }
+  .helix-end {
+    position: absolute; left: 50%; transform: translateX(-50%); white-space: nowrap;
+    font-family: 'JetBrains Mono', monospace; font-size: 0.58rem; letter-spacing: 0.12em; text-transform: uppercase;
+    color: var(--text-dim);
+  }
+  .helix-end[hidden] { display: none; }
+  .helix-end-top { top: -1.3rem; }
+  .helix-end-bottom { top: calc(100% + 6px); }
