@@ -10,6 +10,7 @@ let highlightedDomain = null;
 
 const helixData = { gene: "", length: 0, domains: [], variants: [], cds: "", transcript: "", cdsMatches: null, cdsState: "" };
 let requestHelixDraw = () => {};
+let focusHelix = () => {};
 
 const RECENT_KEY = "gene-explorer-recent";
 const MAX_RECENT = 3;
@@ -314,6 +315,7 @@ function renderInterPro(entries, proteinLength) {
   const track = document.createElement("div");
   track.className = "domain-track";
   map.appendChild(track);
+  wireMapToHelix(map, track, length, ".domain-bar");
 
   const colors = {
     domain: "#e8a94a",
@@ -681,8 +683,11 @@ async function loadGene() {
     viewer.setClickable({}, true, atom => {
       if (!atom) return;
       const confidence = atom.b != null ? Number(atom.b).toFixed(1) : "-";
+      const codon = codonInfo(Number(atom.resi));
       document.getElementById("residueBar").innerHTML =
-        `<strong>${escapeHtml(atom.resn)} ${escapeHtml(atom.resi)}</strong> · chain ${escapeHtml(atom.chain || "-")} · confidence (pLDDT): ${confidence}`;
+        `<strong>${escapeHtml(atom.resn)} ${escapeHtml(atom.resi)}</strong> · chain ${escapeHtml(atom.chain || "-")} · confidence (pLDDT): ${confidence}` +
+        (codon ? ` · codon ${codon.codon} (c.${codon.cStart}–${codon.cEnd})` : "");
+      focusHelix(Number(atom.resi), "structure");
     });
 
     const ss = computeSecondaryStructureStats();
@@ -873,6 +878,7 @@ function highlightDomain(entry, fragment, sourceEl) {
   }
 
   highlightedDomain = { accession: entry.accession, start: fragment.start, end: fragment.end };
+  focusHelix(null);
   reapplyDomainHighlight();
   requestHelixDraw();
 
@@ -1105,6 +1111,7 @@ function renderVariants(variants, proteinLength) {
   const track = document.createElement("div");
   track.className = "domain-track";
   map.appendChild(track);
+  wireMapToHelix(map, track, length, ".variant-tick");
 
   variants.forEach(v => {
     const tick = document.createElement("div");
@@ -1583,6 +1590,36 @@ function renderExpression(rows, gene) {
 
 
 /* ---------------------------------------------------------------------------
+   Reverse link: clicking a residue on the structure, or an empty spot on the
+   domain/variant map, lights up that residue's codon on the DNA helix.
+--------------------------------------------------------------------------- */
+
+function codonInfo(res) {
+  const cds = helixData.cds;
+  if (!cds || !Number.isFinite(res) || res < 1 || res * 3 > cds.length) return null;
+  const codon = cds.slice((res - 1) * 3, res * 3);
+  const aa = translateCodon(codon);
+  return { res, codon, aa, aa3: AA3[aa] || aa, cStart: (res - 1) * 3 + 1, cEnd: res * 3 };
+}
+
+function wireMapToHelix(map, track, proteinLength, markerSelector) {
+  map.classList.add("helix-linked");
+  map.addEventListener("click", e => {
+    if (e.target.closest(markerSelector)) return; // bars/ticks keep their own behaviour
+    const r = track.getBoundingClientRect();
+    if (!r.width) return;
+    const frac = Math.min(1, Math.max(0, (e.clientX - r.left) / r.width));
+    const res = Math.min(proteinLength, Math.max(1, Math.round(frac * proteinLength + 0.5)));
+    const codon = codonInfo(res);
+    document.getElementById("residueBar").innerHTML = codon
+      ? `<strong>Residue ${res} · ${escapeHtml(codon.aa3)}</strong> · codon ${codon.codon} (c.${codon.cStart}–${codon.cEnd}) · lit on the DNA helix`
+      : `<strong>Residue ${res}</strong>`;
+    focusHelix(res, "map");
+  });
+}
+
+
+/* ---------------------------------------------------------------------------
    Coding sequence (CDS) for the helix: Ensembl transcript linked from the
    UniProt entry (falls back to Ensembl's canonical transcript), checked by
    translating it and comparing with the UniProt protein sequence.
@@ -1690,6 +1727,7 @@ async function loadCds(gene, accession, fullData, requestId, signal) {
   let wrap, canvas, ctx, tipMain, tipSub, legend, H = 0, raf = 0, lastFrame = 0;
   let offset = 0, spin = 0, hoverBp = -1, flags = null, varByRes = new Map(), domByRes = [];
   let lastCaption = "";
+  let focus = null; // { res, source, y0 } — a single residue lit from the structure or a map
 
   const visibleBp = () => Math.max(1, Math.floor((H - TOP * 2) / STEP));
 
@@ -1713,6 +1751,10 @@ async function loadCds(gene, accession, fullData, requestId, signal) {
     const len = helixData.cds.length;
     const n = visibleBp();
     const maxOff = Math.max(0, len - n);
+    if (focus) {
+      const mid = (focus.res - 1) * 3 + 1.5;
+      return Math.min(maxOff, Math.max(0, mid - n / 2));
+    }
     if (highlightedDomain) {
       const a = (highlightedDomain.start - 1) * 3;
       const b = highlightedDomain.end * 3;
@@ -1790,6 +1832,7 @@ async function loadCds(gene, accession, fullData, requestId, signal) {
       const f = hasSeq && flags ? flags[res] : 0;
       const lit = hasSeq && highlightedDomain && res >= highlightedDomain.start && res <= highlightedDomain.end;
       const hovered = hasSeq && b === hoverBp;
+      const focused = hasSeq && focus && res === focus.res;
 
       ctx.globalAlpha = depth;
       if (hasSeq) {
@@ -1812,6 +1855,16 @@ async function loadCds(gene, accession, fullData, requestId, signal) {
         ctx.beginPath(); ctx.moveTo(x1, y); ctx.lineTo(x2, y); ctx.stroke();
         ctx.shadowBlur = 0;
       }
+      if (focused) {
+        const pulse = reduceMotion ? 1 : 0.65 + 0.35 * Math.sin(now / 160);
+        ctx.globalAlpha = 1;
+        ctx.shadowColor = "#e8a94a"; ctx.shadowBlur = 14 * pulse;
+        ctx.strokeStyle = `rgba(255, 214, 140, ${0.75 + 0.25 * pulse})`; ctx.lineWidth = 3;
+        ctx.beginPath(); ctx.moveTo(x1 - 3, y); ctx.lineTo(x2 + (x2 > x1 ? 3 : -3), y); ctx.stroke();
+        ctx.shadowBlur = 0;
+        ctx.fillStyle = "#ffd68c";
+        ctx.beginPath(); ctx.arc(x1, y, 2.6, 0, Math.PI * 2); ctx.arc(x2, y, 2.6, 0, Math.PI * 2); ctx.fill();
+      }
       if (f & 2) {
         ctx.globalAlpha = 1;
         ctx.fillStyle = lit ? "#ff4d4d" : "#e07a5f";
@@ -1830,8 +1883,13 @@ async function loadCds(gene, accession, fullData, requestId, signal) {
   }
 
   function idleCaption() {
-    let main = "", sub = "";
-    if (helixData.cds) {
+    let main = "", sub = "", accent = false;
+    const fc = focus && codonInfo(focus.res);
+    if (fc) {
+      main = `c.${fc.cStart}–${fc.cEnd} ${fc.codon} → ${fc.aa3}`;
+      sub = `residue ${fc.res} · via ${focus.source === "structure" ? "structure" : "map"}`;
+      accent = true;
+    } else if (helixData.cds) {
       const top = Math.max(1, Math.round(offset) + 1);
       const bottom = Math.min(helixData.cds.length, top + visibleBp() - 1);
       main = `${helixData.gene} CDS · c.${top}–${bottom}`;
@@ -1844,7 +1902,7 @@ async function loadCds(gene, accession, fullData, requestId, signal) {
         : `${helixData.gene} · loading sequence…`;
     }
     const caption = main + "|" + sub;
-    if (caption !== lastCaption) { lastCaption = caption; setTip(main, sub, false); }
+    if (caption !== lastCaption) { lastCaption = caption; setTip(main, sub, accent); }
     legend.hidden = !helixData.cds;
   }
 
@@ -1932,6 +1990,17 @@ async function loadCds(gene, accession, fullData, requestId, signal) {
     tipMain = wrap.querySelector(".helix-tip-main");
     tipSub = wrap.querySelector(".helix-tip-sub");
     legend = wrap.querySelector(".helix-legend");
+
+    focusHelix = (res, source) => {
+      focus = res && codonInfo(res) ? { res, source, y0: window.scrollY } : null;
+      lastCaption = "";
+      if (focus && !wide.matches) return;
+      if (!raf) draw(performance.now(), reduceMotion);
+    };
+    // Scrolling away hands the helix back to scroll-following
+    window.addEventListener("scroll", () => {
+      if (focus && Math.abs(window.scrollY - focus.y0) > 160) { focus = null; lastCaption = ""; }
+    }, { passive: true });
 
     requestHelixDraw = () => {
       rebuildFlags();
