@@ -754,18 +754,17 @@ function applyColoring() {
 function reapplyDomainHighlight() {
   if (!viewer || !model || !highlightedDomain) return;
   const sel = { resi: `${highlightedDomain.start}-${highlightedDomain.end}` };
+  const outside = { not: sel };
   const styleMode = document.getElementById("styleSelect").value;
-  const HL = "#ff4d4d";
+  const GREY = "#5c5c5c";
 
-  // Recolor the selection *within* the current representation rather than
-  // adding a second one on top. Stacking sticks over cartoon made whole-protein
-  // family entries (e.g. a 450-residue span) render as an unreadable red blob.
+  // applyColoring() has already painted the whole protein in the current
+  // color scheme. Grey out everything outside the domain so the domain keeps
+  // its real colors and the rest of the structure fades to black & white.
   if (styleMode === "sphere") {
-    viewer.setStyle({ ...sel, atom: "CA" }, { sphere: { color: HL, radius: 1.3 } });
-  } else if (styleMode === "stick") {
-    viewer.setStyle(sel, { stick: { color: HL, radius: 0.3 } });
+    viewer.setStyle({ atom: "CA", ...outside }, { sphere: { color: GREY, radius: 1.1 } });
   } else {
-    viewer.setStyle(sel, { cartoon: { color: HL, thickness: 1.0 } });
+    viewer.setStyle(outside, { [styleMode]: { color: GREY } });
   }
   viewer.render();
 }
@@ -785,8 +784,6 @@ function highlightDomain(entry, fragment, sourceEl) {
   if (isSame) {
     highlightedDomain = null;
     document.getElementById("residueBar").textContent = "Click any residue in the structure to inspect it.";
-    viewer.zoomTo({}, 600); // fly back out to the whole protein
-    viewer.render();
     return;
   }
 
@@ -802,30 +799,11 @@ function highlightDomain(entry, fragment, sourceEl) {
 
   document.getElementById("residueBar").innerHTML =
     `<strong>${escapeHtml(entry.name)}</strong> · ${escapeHtml(entry.accession)} · ` +
-    `residues ${fragment.start}-${fragment.end} highlighted in red` +
+    `residues ${fragment.start}-${fragment.end} in color, rest greyed out` +
     (coversMost ? ` · note: this entry spans ~${Math.round((span / total) * 100)}% of the protein` : "") +
     ` · click again to clear`;
 
-  // Stop spinning so the domain stays in view
-  if (spinning) {
-    spinning = false;
-    viewer.spin(false);
-    const spinToggle = document.getElementById("spinToggle");
-    if (spinToggle) spinToggle.checked = false;
-  }
-
-  // Fly the camera to the highlighted residues
-  viewer.zoomTo({ resi: `${fragment.start}-${fragment.end}` }, 600);
-  viewer.render();
-
-  // Scroll up and briefly flash the viewer so it's obvious what changed
-  const viewerEl = document.getElementById("viewer");
-  if (viewerEl) {
-    viewerEl.scrollIntoView({ behavior: "smooth", block: "center" });
-    viewerEl.classList.remove("domain-flash");
-    void viewerEl.offsetWidth; // restart the animation on repeated clicks
-    viewerEl.classList.add("domain-flash");
-  }
+  document.getElementById("viewer")?.scrollIntoView({ behavior: "smooth", block: "center" });
 }
 
 function toggleSpin() {
