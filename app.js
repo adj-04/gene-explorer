@@ -8,7 +8,7 @@ let currentGeneName = "";
 let currentProteinLength = 0;
 let highlightedDomain = null;
 
-const helixData = { gene: "", length: 0, domains: [], variants: [] };
+const helixData = { gene: "", length: 0, domains: [], variants: [], cds: "", transcript: "", cdsMatches: null };
 let requestHelixDraw = () => {};
 
 const RECENT_KEY = "gene-explorer-recent";
@@ -131,7 +131,7 @@ function resetResultPanels() {
   document.getElementById("ideoHint").textContent = "";
   document.getElementById("ideoLocText").textContent = "";
   resetExtraSections();
-  Object.assign(helixData, { gene: "", length: 0, domains: [], variants: [] });
+  Object.assign(helixData, { gene: "", length: 0, domains: [], variants: [], cds: "", transcript: "", cdsMatches: null });
   requestHelixDraw();
   highlightedDomain = null;
   currentProteinLength = 0;
@@ -695,6 +695,7 @@ async function loadGene() {
     let refsHtml = "No linked publications found.";
     let geneId = "-";
     let ncbiSummary = "";
+    let fullDataForCds = null;
     setStatus("Loading annotations and references…", false, true);
     setProgress(2);
 
@@ -706,6 +707,7 @@ async function loadGene() {
         fullData = await fullRes.json();
         cacheSet(fullKey, fullData);
       }
+      fullDataForCds = fullData;
       geneId = (fullData.uniProtKBCrossReferences || []).find(x => x.database === "GeneID")?.id || "-";
       const refs = (fullData.references || []).slice(0, 12).map(r => {
         const pmid = (r.citationCrossReferences || []).find(x => x.database === "PubMed")?.id;
@@ -726,6 +728,7 @@ async function loadGene() {
     }
 
     if (!isCurrentRequest(requestId)) return;
+    loadCds(gene, accession, fullDataForCds, requestId, signal); // background: real coding sequence for the helix
     setProgress(3);
     setStatus("Loading protein domains and features…", false, true);
 
@@ -1580,160 +1583,319 @@ function renderExpression(rows, gene) {
 
 
 /* ---------------------------------------------------------------------------
-   Left-margin DNA helix. Purely ambient until a gene loads; then its rungs map
-   onto the protein from residue 1 (top) to the last residue (bottom): domains
-   glow amber, pathogenic variants show as coral rungs, and whatever is
-   highlighted on the structure lights up red. It twists as you scroll.
-   Hover a rung for what's there; click it to highlight that on the structure.
-   The page works exactly the same without it (hidden on smaller screens).
+   Coding sequence (CDS) for the helix: Ensembl transcript linked from the
+   UniProt entry (falls back to Ensembl's canonical transcript), checked by
+   translating it and comparing with the UniProt protein sequence.
+--------------------------------------------------------------------------- */
+
+const CODON_TABLE = "FFLLSSSSYY**CC*WLLLLPPPPHHQQRRRRIIIMTTTTNNKKSSRRVVVVAAAADDEEGGGG";
+const BASE_INDEX = { T: 0, C: 1, A: 2, G: 3 };
+const AA3 = {
+  A: "Ala", R: "Arg", N: "Asn", D: "Asp", C: "Cys", Q: "Gln", E: "Glu", G: "Gly", H: "His", I: "Ile",
+  L: "Leu", K: "Lys", M: "Met", F: "Phe", P: "Pro", S: "Ser", T: "Thr", W: "Trp", Y: "Tyr", V: "Val", "*": "Stop"
+};
+const COMPLEMENT = { A: "T", T: "A", G: "C", C: "G", N: "N" };
+
+function translateCodon(codon) {
+  if (codon.length !== 3) return "X";
+  const [a, b, c] = codon.split("").map(ch => BASE_INDEX[ch]);
+  if (a === undefined || b === undefined || c === undefined) return "X";
+  return CODON_TABLE[a * 16 + b * 4 + c];
+}
+
+function translate(seq) {
+  let out = "";
+  for (let i = 0; i + 2 < seq.length; i += 3) out += translateCodon(seq.slice(i, i + 3));
+  return out;
+}
+
+function pickEnsemblTranscript(fullData, accession) {
+  const refs = (fullData?.uniProtKBCrossReferences || []).filter(x => x.database === "Ensembl" && /^ENST/.test(x.id || ""));
+  const canonical = refs.find(x => !x.isoformId || x.isoformId === `${accession}-1`) || refs[0];
+  return canonical?.id || "";
+}
+
+async function loadCds(gene, accession, fullData, requestId, signal) {
+  try {
+    const key = cacheKey("cds", accession);
+    let rec = cacheGet(key);
+    if (!rec) {
+      let tid = pickEnsemblTranscript(fullData, accession);
+      if (!tid) {
+        const res = await apiFetch(
+          `https://rest.ensembl.org/lookup/symbol/homo_sapiens/${encodeURIComponent(gene)}?content-type=application/json`,
+          { headers: { Accept: "application/json" } }, { signal }
+        );
+        tid = (await res.json()).canonical_transcript || "";
+      }
+      tid = tid.split(".")[0];
+      if (!tid) return;
+      const res = await apiFetch(
+        `https://rest.ensembl.org/sequence/id/${encodeURIComponent(tid)}?type=cds&content-type=application/json`,
+        { headers: { Accept: "application/json" } }, { signal }
+      );
+      const seq = String((await res.json()).seq || "").toUpperCase().replace(/[^ACGTN]/g, "");
+      if (seq.length < 3) return;
+      rec = { transcript: tid, seq };
+      cacheSet(key, rec);
+    }
+    if (!isCurrentRequest(requestId)) return;
+    const protein = String(fullData?.sequence?.value || "").toUpperCase();
+    const translated = translate(rec.seq).replace(/\*$/, "");
+    helixData.cds = rec.seq;
+    helixData.transcript = rec.transcript;
+    helixData.cdsMatches = protein ? translated === protein : null;
+    requestHelixDraw();
+  } catch (e) {
+    if (e.name !== "AbortError") console.warn("CDS load failed:", e);
+  }
+}
+
+
+/* ---------------------------------------------------------------------------
+   Left-margin DNA helix, drawn from the gene's real coding sequence.
+   - Geometry follows B-DNA: 10.5 bp per turn, rise:diameter ≈ 3.4:20, and the
+     two backbones offset so the major and minor grooves show.
+   - Each rung is one real base pair, coloured by base (A, T, G, C).
+   - The helix screws along the CDS as you scroll: top of page = start codon,
+     bottom = stop codon. Highlighting a domain/variant/residue glides it to
+     that region's codons.
+   - Domains tint the backbone amber, pathogenic variants mark their codon,
+     the highlighted region glows red.
+   - Hover a base pair for its c. position, codon and amino acid; click it to
+     highlight that residue (or its domain/variant) on the structure.
+   Before a gene loads it's a plain grey helix. Hidden on smaller screens; the
+   page works the same without it.
 --------------------------------------------------------------------------- */
 
 (function initHelix() {
-  const W = 88;               // css px
-  const STEP = 9;             // px between rungs
-  const AMP = 26;             // helix radius
-  const TURN = 150;           // px per full turn
+  const W = 88;
+  const R = 22;                          // radius (diameter ≈ 20 Å)
+  const BP_PER_TURN = 10.5;
+  const STEP = (2 * R) * (3.4 / 20);     // rise per bp, scaled to the diameter
+  const GROOVE = Math.PI * 2 * 0.38;     // backbone offset → minor (narrow) and major (wide) grooves
+  const TOP = 8;
+  const BASE_COLORS = { A: "#78bfa0", T: "#e07a5f", G: "#e8a94a", C: "#8aa7d9", N: "#85837a" };
   const reduceMotion = window.matchMedia?.("(prefers-reduced-motion: reduce)").matches;
   const wide = window.matchMedia("(min-width: 1341px)");
 
-  let wrap, canvas, ctx, tip, H = 0, dpr = 1, raf = 0, lastFrame = 0, hoverRung = -1;
+  let wrap, canvas, ctx, tipMain, tipSub, legend, H = 0, raf = 0, lastFrame = 0;
+  let offset = 0, spin = 0, hoverBp = -1, flags = null, varByRes = new Map(), domByRes = [];
+  let lastCaption = "";
 
-  const C = {
-    strand: "133, 131, 122",
-    rung: "rgba(133, 131, 122, 0.22)",
-    domain: "rgba(232, 169, 74, 0.6)",
-    variant: "rgba(224, 122, 95, 0.9)",
-    highlight: "#ff4d4d",
-    hover: "rgba(232, 230, 223, 0.9)"
-  };
+  const visibleBp = () => Math.max(1, Math.floor((H - TOP * 2) / STEP));
 
-  function rungCount() { return Math.max(1, Math.floor((H - 12) / STEP) + 1); }
-
-  function rungRange(i) {
+  function rebuildFlags() {
     const L = helixData.length;
-    if (!L) return null;
-    const n = rungCount();
-    const start = Math.floor((i / n) * L) + 1;
-    const end = Math.max(start, Math.floor(((i + 1) / n) * L));
-    return { start, end };
+    flags = new Uint8Array(L + 2);
+    domByRes = new Array(L + 2);
+    varByRes = new Map();
+    helixData.domains.forEach(d => {
+      for (let r = Math.max(1, d.fragment.start); r <= Math.min(L, d.fragment.end); r++) {
+        flags[r] |= 1;
+        if (!domByRes[r]) domByRes[r] = d;
+      }
+    });
+    helixData.variants.forEach(v => {
+      if (v.pos >= 1 && v.pos <= L) { flags[v.pos] |= 2; if (!varByRes.has(v.pos)) varByRes.set(v.pos, v); }
+    });
   }
 
-  function rungInfo(i) {
-    const r = rungRange(i);
-    if (!r) return null;
-    const variant = helixData.variants.find(v => v.pos >= r.start && v.pos <= r.end) || null;
-    const domain = helixData.domains.find(d => d.fragment.start <= r.end && d.fragment.end >= r.start) || null;
-    const lit = highlightedDomain && highlightedDomain.start <= r.end && highlightedDomain.end >= r.start;
-    return { ...r, variant, domain, lit };
+  function targetOffset() {
+    const len = helixData.cds.length;
+    const n = visibleBp();
+    const maxOff = Math.max(0, len - n);
+    if (highlightedDomain) {
+      const a = (highlightedDomain.start - 1) * 3;
+      const b = highlightedDomain.end * 3;
+      const t = b - a <= n ? (a + b) / 2 - n / 2 : a - 3;
+      return Math.min(maxOff, Math.max(0, t));
+    }
+    const docH = document.documentElement.scrollHeight;
+    const progress = Math.min(1, Math.max(0, window.scrollY / Math.max(1, docH - window.innerHeight)));
+    return progress * maxOff;
   }
 
   function resize() {
     if (!wrap) return;
-    dpr = window.devicePixelRatio || 1;
-    H = wrap.clientHeight;
+    const dpr = window.devicePixelRatio || 1;
+    H = wrap.querySelector(".helix-stage").clientHeight;
     canvas.width = Math.round(W * dpr);
     canvas.height = Math.round(H * dpr);
     ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
-    draw(performance.now());
+    draw(performance.now(), true);
   }
 
-  function draw(now) {
+  const yOf = t => TOP + (t - offset) * STEP;
+  const angleOf = t => (t * Math.PI * 2) / BP_PER_TURN + spin;
+
+  function draw(now, snap) {
     if (!ctx || !H) return;
+    const hasSeq = !!helixData.cds;
+
+    if (hasSeq) {
+      const target = targetOffset();
+      offset = snap || reduceMotion ? target : offset + (target - offset) * 0.12;
+    } else {
+      offset = window.scrollY / STEP * 0.25; // idle: drift with scroll
+    }
+    if (!reduceMotion) spin = now * 0.00025;
+
     ctx.clearRect(0, 0, W, H);
     const cx = W / 2;
-    const k = (Math.PI * 2) / TURN;
-    const phase = (reduceMotion ? 0 : now * 0.00045) + window.scrollY * 0.006;
-    const loaded = helixData.length > 0;
+    const first = Math.floor(offset) - 1;
+    const last = first + visibleBp() + 3;
 
-    // Backbones: short segments, brighter when the strand is in front
+    // Backbones (sugar-phosphate), tinted amber across domains
     for (let s = 0; s < 2; s++) {
-      const offset = s ? Math.PI : 0;
+      const shift = s ? GROOVE : 0;
       let px = null, py = null;
-      for (let y = 6; y <= H - 6; y += 3) {
-        const a = k * y + phase + offset;
-        const x = cx + AMP * Math.sin(a);
-        const z = Math.cos(a);
-        if (px !== null) {
-          ctx.strokeStyle = `rgba(${C.strand}, ${0.12 + 0.45 * (z + 1) / 2})`;
-          ctx.lineWidth = 1 + 0.8 * (z + 1) / 2;
+      for (let t = first; t <= last; t += 0.25) {
+        const y = yOf(t);
+        const a = angleOf(t) + shift;
+        const x = cx + R * Math.sin(a);
+        const z = (Math.cos(a) + 1) / 2;
+        if (px !== null && y > 0 && py < H) {
+          const res = Math.floor(t / 3) + 1;
+          const inDomain = hasSeq && flags && flags[res] & 1;
+          ctx.strokeStyle = inDomain
+            ? `rgba(232, 169, 74, ${0.25 + 0.6 * z})`
+            : `rgba(133, 131, 122, ${0.12 + 0.45 * z})`;
+          ctx.lineWidth = 1 + 1.1 * z;
           ctx.beginPath(); ctx.moveTo(px, py); ctx.lineTo(x, y); ctx.stroke();
         }
         px = x; py = y;
       }
     }
 
-    // Rungs (base pairs)
-    const n = rungCount();
-    for (let i = 0; i < n; i++) {
-      const y = 6 + i * STEP;
-      const a = k * y + phase;
-      const x1 = cx + AMP * Math.sin(a);
-      const x2 = cx - AMP * Math.sin(a);
-      const depth = 0.45 + 0.55 * Math.abs(Math.cos(a));
-      const info = loaded ? rungInfo(i) : null;
-
-      let color = C.rung, width = 1, glow = 0;
-      if (info?.domain) { color = C.domain; width = 1.3; }
-      if (info?.variant) { color = C.variant; width = 1.5; }
-      if (info?.lit) { color = C.highlight; width = 2; glow = 10; }
-      if (i === hoverRung && loaded) { color = C.hover; width = 2; }
+    // Base pairs
+    const cds = helixData.cds;
+    for (let b = Math.max(0, first); b <= last; b++) {
+      if (hasSeq && b >= cds.length) break;
+      const y = yOf(b);
+      if (y < 2 || y > H - 2) continue;
+      const a1 = angleOf(b), a2 = a1 + GROOVE;
+      const x1 = cx + R * Math.sin(a1), x2 = cx + R * Math.sin(a2);
+      const depth = 0.35 + 0.65 * ((Math.cos(a1) + Math.cos(a2)) / 4 + 0.5);
+      const xm = (x1 + x2) / 2;
+      const res = Math.floor(b / 3) + 1;
+      const f = hasSeq && flags ? flags[res] : 0;
+      const lit = hasSeq && highlightedDomain && res >= highlightedDomain.start && res <= highlightedDomain.end;
+      const hovered = hasSeq && b === hoverBp;
 
       ctx.globalAlpha = depth;
-      ctx.shadowColor = glow ? C.highlight : "transparent";
-      ctx.shadowBlur = glow;
-      ctx.strokeStyle = color;
-      ctx.lineWidth = width;
-      ctx.beginPath(); ctx.moveTo(x1, y); ctx.lineTo(x2, y); ctx.stroke();
+      if (hasSeq) {
+        const base = cds[b], comp = COMPLEMENT[base] || "N";
+        ctx.lineWidth = hovered ? 2.4 : 1.6;
+        ctx.strokeStyle = hovered ? "#e8e6df" : BASE_COLORS[base];
+        ctx.beginPath(); ctx.moveTo(x1, y); ctx.lineTo(xm, y); ctx.stroke();
+        ctx.strokeStyle = hovered ? "#e8e6df" : BASE_COLORS[comp];
+        ctx.beginPath(); ctx.moveTo(xm, y); ctx.lineTo(x2, y); ctx.stroke();
+      } else {
+        ctx.lineWidth = 1;
+        ctx.strokeStyle = "rgba(133, 131, 122, 0.3)";
+        ctx.beginPath(); ctx.moveTo(x1, y); ctx.lineTo(x2, y); ctx.stroke();
+      }
 
-      if (info?.variant || info?.lit) {
-        ctx.fillStyle = info.lit ? C.highlight : C.variant;
-        ctx.beginPath(); ctx.arc(x1, y, info.lit ? 2.4 : 1.8, 0, Math.PI * 2); ctx.fill();
+      if (lit) {
+        ctx.globalAlpha = 1;
+        ctx.shadowColor = "#ff4d4d"; ctx.shadowBlur = 8;
+        ctx.strokeStyle = "rgba(255, 77, 77, 0.85)"; ctx.lineWidth = 2.2;
+        ctx.beginPath(); ctx.moveTo(x1, y); ctx.lineTo(x2, y); ctx.stroke();
+        ctx.shadowBlur = 0;
+      }
+      if (f & 2) {
+        ctx.globalAlpha = 1;
+        ctx.fillStyle = lit ? "#ff4d4d" : "#e07a5f";
+        ctx.beginPath(); ctx.arc(x1, y, 2.1, 0, Math.PI * 2); ctx.arc(x2, y, 2.1, 0, Math.PI * 2); ctx.fill();
       }
     }
     ctx.globalAlpha = 1;
-    ctx.shadowBlur = 0;
+
+    if (hoverBp < 0) idleCaption();
   }
 
-  function setTip(text, accent) {
-    tip.textContent = text;
-    tip.classList.toggle("accent", !!accent);
+  function setTip(main, sub, accent) {
+    tipMain.textContent = main;
+    tipSub.textContent = sub;
+    tipMain.classList.toggle("accent", !!accent);
   }
 
-  function idleTip() {
-    setTip(helixData.length ? `${helixData.gene} · 1–${helixData.length} aa` : "", false);
+  function idleCaption() {
+    let main = "", sub = "";
+    if (helixData.cds) {
+      const top = Math.max(1, Math.round(offset) + 1);
+      const bottom = Math.min(helixData.cds.length, top + visibleBp() - 1);
+      main = `${helixData.gene} CDS · c.${top}–${bottom}`;
+      sub = helixData.cdsMatches === false
+        ? `${helixData.transcript} · isoform ≠ UniProt`
+        : helixData.transcript;
+    } else if (helixData.length) {
+      main = `${helixData.gene} · loading sequence…`;
+    }
+    const caption = main + "|" + sub;
+    if (caption !== lastCaption) { lastCaption = caption; setTip(main, sub, false); }
+    legend.hidden = !helixData.cds;
+  }
+
+  function bpAt(e) {
+    const y = e.clientY - canvas.getBoundingClientRect().top;
+    const b = Math.round(offset + (y - TOP) / STEP);
+    return b >= 0 && b < helixData.cds.length ? b : -1;
   }
 
   function onMove(e) {
-    if (!helixData.length) return;
-    const y = e.clientY - canvas.getBoundingClientRect().top;
-    const i = Math.min(rungCount() - 1, Math.max(0, Math.round((y - 6) / STEP)));
-    if (i !== hoverRung) { hoverRung = i; requestHelixDraw(); }
-    const info = rungInfo(i);
-    if (!info) return;
-    const what = info.variant
-      ? `${variantLabel(info.variant)}${info.variant.diseases[0] ? " · " + info.variant.diseases[0] : ""}`
-      : info.domain ? info.domain.entry.name : "";
-    setTip(`aa ${info.start}–${info.end}${what ? " · " + what : ""}`, !!what);
-    canvas.style.cursor = what ? "pointer" : "default";
+    if (!helixData.cds) return;
+    const b = bpAt(e);
+    if (b === hoverBp) return;
+    hoverBp = b;
+    if (b < 0) { onLeave(); return; }
+    const cds = helixData.cds;
+    const res = Math.floor(b / 3) + 1;
+    const codon = cds.slice((res - 1) * 3, res * 3);
+    const aa = translateCodon(codon);
+    const v = varByRes.get(res);
+    const d = domByRes[res];
+    const extra = v ? ` · ${variantLabel(v)}` : d ? ` · ${d.entry.name}` : "";
+    setTip(
+      `c.${b + 1} ${cds[b]}–${COMPLEMENT[cds[b]] || "N"}`,
+      `codon ${res} ${codon} → ${AA3[aa] || aa}${extra}`,
+      true
+    );
+    lastCaption = "";
+    canvas.style.cursor = res <= helixData.length ? "pointer" : "default";
+    if (reduceMotion) draw(performance.now());
   }
 
   function onLeave() {
-    hoverRung = -1;
+    hoverBp = -1;
     canvas.style.cursor = "default";
-    idleTip();
-    requestHelixDraw();
+    lastCaption = "";
+    draw(performance.now());
   }
 
-  function onClick() {
-    if (hoverRung < 0 || !helixData.length) return;
-    const info = rungInfo(hoverRung);
-    if (info?.variant) highlightVariant(info.variant, null);
-    else if (info?.domain) highlightDomain(info.domain.entry, info.domain.fragment, null);
+  function onClick(e) {
+    if (!helixData.cds) return;
+    const b = bpAt(e);
+    if (b < 0) return;
+    const res = Math.floor(b / 3) + 1;
+    if (res > helixData.length) return; // stop codon
+    const v = varByRes.get(res);
+    const d = domByRes[res];
+    if (v) { highlightVariant(v, null); return; }
+    if (d) { highlightDomain(d.entry, d.fragment, null); return; }
+    const codon = helixData.cds.slice((res - 1) * 3, res * 3);
+    const aa = translateCodon(codon);
+    highlightDomain(
+      { accession: `RES-${res}`, displayId: `codon ${codon}`, name: `${AA3[aa] || aa}${res}` },
+      { start: res, end: res },
+      null
+    );
   }
 
   function loop(now) {
     raf = requestAnimationFrame(loop);
-    if (now - lastFrame < 33) return; // ~30fps is plenty for an ambient animation
+    if (now - lastFrame < 33) return;
     lastFrame = now;
     draw(now);
   }
@@ -1747,28 +1909,36 @@ function renderExpression(rows, gene) {
   window.addEventListener("load", () => {
     wrap = document.createElement("div");
     wrap.className = "helix";
-    wrap.setAttribute("aria-hidden", "true");
-    wrap.innerHTML = `<canvas></canvas><div class="helix-tip"></div>`;
+    wrap.innerHTML = `
+      <div class="helix-stage"><canvas aria-hidden="true"></canvas></div>
+      <div class="helix-tip"><div class="helix-tip-main"></div><div class="helix-tip-sub"></div></div>
+      <div class="helix-legend" hidden>
+        <span style="color:${BASE_COLORS.A}">A</span><span style="color:${BASE_COLORS.T}">T</span>
+        <span style="color:${BASE_COLORS.G}">G</span><span style="color:${BASE_COLORS.C}">C</span>
+      </div>`;
     document.body.appendChild(wrap);
     canvas = wrap.querySelector("canvas");
     ctx = canvas.getContext("2d");
-    tip = wrap.querySelector(".helix-tip");
+    tipMain = wrap.querySelector(".helix-tip-main");
+    tipSub = wrap.querySelector(".helix-tip-sub");
+    legend = wrap.querySelector(".helix-legend");
 
     requestHelixDraw = () => {
-      if (tip && hoverRung < 0) idleTip();
-      if (!raf) requestAnimationFrame(() => draw(performance.now()));
+      rebuildFlags();
+      lastCaption = "";
+      if (!raf) requestAnimationFrame(() => draw(performance.now(), true));
     };
 
     canvas.addEventListener("mousemove", onMove);
     canvas.addEventListener("mouseleave", onLeave);
     canvas.addEventListener("click", onClick);
     window.addEventListener("resize", resize);
-    if (reduceMotion) window.addEventListener("scroll", () => requestHelixDraw(), { passive: true });
+    if (reduceMotion) window.addEventListener("scroll", () => draw(performance.now(), true), { passive: true });
     document.addEventListener("visibilitychange", syncRunning);
     wide.addEventListener?.("change", () => { resize(); syncRunning(); });
 
+    rebuildFlags();
     resize();
-    idleTip();
     syncRunning();
   });
 })();
