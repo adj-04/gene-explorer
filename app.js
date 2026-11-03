@@ -1226,3 +1226,188 @@ function renderExpression(rows, gene) {
   `).join("");
   hint.innerHTML = `Full profile: <a class="ext-link" href="https://gtexportal.org/home/gene/${encodeURIComponent(gene)}" target="_blank" rel="noopener">GTEx Portal →</a>`;
 }
+
+
+/* ---------------------------------------------------------------------------
+   Jump navigation: a live minimap rail in the right margin (wide screens)
+   and a floating section pill (narrow screens). Dots sit at each section's
+   real position on the page and re-flow as sections load; the outlined
+   window shows exactly which slice of the page is on screen.
+--------------------------------------------------------------------------- */
+
+(function initJumpNav() {
+  const SECTIONS = [
+    ["viewer", "Structure"],
+    ["info", "Overview"],
+    ["interproSection", "Domains"],
+    ["locationSection", "Location"],
+    ["variantSection", "Variants"],
+    ["partnerSection", "Partners"],
+    ["exprSection", "Expression"],
+    [".learn-section", "Read more"]
+  ];
+  const MIN_GAP = 22;
+  const reduceMotion = window.matchMedia?.("(prefers-reduced-motion: reduce)").matches;
+
+  let rail, railInner, fill, win, pill, pillLabel, pillBar, menu;
+  let items = [];
+  let itemsKey = "";
+  let activeSel = null;
+  let ticking = false;
+  let layoutQueued = false;
+
+  const find = sel => (sel.startsWith(".") ? document.querySelector(sel) : document.getElementById(sel));
+  const isShown = node => node && !node.hidden && node.getClientRects().length > 0 && node.getBoundingClientRect().height > 0;
+  const docHeight = () => Math.max(document.documentElement.scrollHeight, 1);
+
+  function build() {
+    rail = document.createElement("nav");
+    rail.className = "jump-rail";
+    rail.setAttribute("aria-label", "Jump to section");
+    rail.hidden = true;
+    rail.innerHTML = `<div class="jr-inner"><div class="jr-track"></div><div class="jr-fill"></div><div class="jr-window"></div></div>`;
+    railInner = rail.querySelector(".jr-inner");
+    fill = rail.querySelector(".jr-fill");
+    win = rail.querySelector(".jr-window");
+    rail.querySelector(".jr-track").addEventListener("click", e => {
+      const r = railInner.getBoundingClientRect();
+      const frac = Math.min(1, Math.max(0, (e.clientY - r.top) / r.height));
+      window.scrollTo({ top: frac * docHeight() - window.innerHeight / 2, behavior: reduceMotion ? "auto" : "smooth" });
+    });
+
+    pill = document.createElement("div");
+    pill.className = "jump-pill";
+    pill.hidden = true;
+    pill.innerHTML = `
+      <div class="jp-menu" hidden></div>
+      <button type="button" class="jp-button" aria-haspopup="true" aria-expanded="false" aria-label="Jump to section">
+        <span class="jp-dot"></span><span class="jp-label">Structure</span><span class="jp-caret">&#9662;</span>
+        <span class="jp-bar"></span>
+      </button>`;
+    menu = pill.querySelector(".jp-menu");
+    pillLabel = pill.querySelector(".jp-label");
+    pillBar = pill.querySelector(".jp-bar");
+    const pillButton = pill.querySelector(".jp-button");
+    pillButton.addEventListener("click", e => {
+      e.stopPropagation();
+      menu.hidden = !menu.hidden;
+      pillButton.setAttribute("aria-expanded", String(!menu.hidden));
+    });
+    document.addEventListener("click", e => {
+      if (!pill.contains(e.target)) { menu.hidden = true; pillButton.setAttribute("aria-expanded", "false"); }
+    });
+    document.addEventListener("keydown", e => {
+      if (e.key === "Escape") { menu.hidden = true; pillButton.setAttribute("aria-expanded", "false"); }
+    });
+
+    document.body.append(rail, pill);
+  }
+
+  function go(it) {
+    const top = it.node.getBoundingClientRect().top + window.scrollY - 20;
+    window.scrollTo({ top, behavior: reduceMotion ? "auto" : "smooth" });
+    menu.hidden = true;
+  }
+
+  function layout() {
+    layoutQueued = false;
+    const ready = typeof model !== "undefined" && model !== null;
+    rail.hidden = !ready;
+    pill.hidden = !ready;
+    if (!ready) { menu.hidden = true; return; }
+
+    const found = SECTIONS
+      .map(([sel, label]) => ({ sel, label, node: find(sel) }))
+      .filter(s => isShown(s.node));
+    const key = found.map(s => s.sel).join("|");
+
+    if (key !== itemsKey) {
+      itemsKey = key;
+      railInner.querySelectorAll(".jr-item").forEach(n => n.remove());
+      menu.innerHTML = "";
+      items = found.map(s => {
+        const item = document.createElement("div");
+        item.className = "jr-item";
+        item.innerHTML = `<button type="button" class="jr-dot" aria-label="Jump to ${s.label}"></button><span class="jr-label">${s.label}</span>`;
+        const dot = item.querySelector(".jr-dot");
+        railInner.appendChild(item);
+
+        const option = document.createElement("button");
+        option.type = "button";
+        option.className = "jp-option";
+        option.textContent = s.label;
+        menu.appendChild(option);
+
+        const it = { ...s, item, dot, option, top: 0, y: 0 };
+        dot.addEventListener("click", () => go(it));
+        option.addEventListener("click", () => go(it));
+        return it;
+      });
+      activeSel = null;
+    } else {
+      items.forEach((it, i) => { it.node = found[i].node; });
+    }
+
+    const docH = docHeight();
+    const railH = railInner.clientHeight || 1;
+    let last = -Infinity;
+    items.forEach(it => {
+      it.top = it.node.getBoundingClientRect().top + window.scrollY;
+      const y = Math.min(railH, Math.max((it.top / docH) * railH, last + MIN_GAP));
+      it.y = y;
+      last = y;
+      it.item.style.top = `${y}px`;
+    });
+    update();
+  }
+
+  function update() {
+    ticking = false;
+    if (rail.hidden || !items.length) return;
+    const docH = docHeight();
+    const railH = railInner.clientHeight || 1;
+    const y = window.scrollY;
+    const vh = window.innerHeight;
+
+    win.style.top = `${(y / docH) * railH}px`;
+    win.style.height = `${Math.max(12, (vh / docH) * railH)}px`;
+
+    const probe = y + vh * 0.35;
+    let current = items[0];
+    items.forEach(it => { if (it.top <= probe) current = it; });
+    if (y + vh >= docH - 4) current = items[items.length - 1];
+
+    fill.style.height = `${current.y}px`;
+    items.forEach(it => {
+      it.item.classList.toggle("active", it === current);
+      it.item.classList.toggle("passed", it.top < current.top);
+      it.option.classList.toggle("active", it === current);
+    });
+
+    const progress = Math.min(1, Math.max(0, y / Math.max(1, docH - vh)));
+    pillBar.style.transform = `scaleX(${progress})`;
+
+    if (current.sel !== activeSel) {
+      activeSel = current.sel;
+      pillLabel.textContent = current.label;
+      pillLabel.classList.remove("swap");
+      void pillLabel.offsetWidth; // restart the slide-in animation
+      pillLabel.classList.add("swap");
+    }
+  }
+
+  const queueUpdate = () => { if (!ticking) { ticking = true; requestAnimationFrame(update); } };
+  const queueLayout = () => { if (!layoutQueued) { layoutQueued = true; requestAnimationFrame(layout); } };
+
+  window.addEventListener("load", () => {
+    build();
+    window.addEventListener("scroll", queueUpdate, { passive: true });
+    window.addEventListener("resize", queueLayout);
+    const page = document.querySelector(".page");
+    if (page) {
+      if ("ResizeObserver" in window) new ResizeObserver(queueLayout).observe(page);
+      new MutationObserver(queueLayout).observe(page, { attributes: true, attributeFilter: ["hidden", "style"], subtree: true, childList: true });
+    }
+    queueLayout();
+  });
+})();
