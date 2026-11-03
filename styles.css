@@ -395,3 +395,28 @@
   .helix-end[hidden] { display: none; }
   .helix-end-top { top: -1.3rem; }
   .helix-end-bottom { top: calc(100% + 6px); }
+
+  /* "See it on the structure" / "Back to where you were" chip + rail marker */
+  .return-chip {
+    position: fixed; left: 50%; bottom: 22px; transform: translateX(-50%); z-index: 40;
+    background: var(--panel); color: var(--text); border: 1px solid var(--accent); border-radius: 999px;
+    padding: 0.5rem 1rem; font-family: 'JetBrains Mono', monospace; font-weight: 500; font-size: 0.72rem;
+    letter-spacing: 0.06em; box-shadow: 0 8px 26px rgba(0, 0, 0, 0.55), 0 0 14px rgba(232, 169, 74, 0.18);
+  }
+  .return-chip:hover { background: var(--panel); color: var(--accent); }
+  .return-chip[hidden] { display: none; }
+  .return-chip.in { animation: chip-in 0.3s cubic-bezier(0.2, 0.8, 0.2, 1); }
+  @keyframes chip-in { from { opacity: 0; transform: translate(-50%, 10px); } to { opacity: 1; transform: translate(-50%, 0); } }
+  .jr-here { position: absolute; left: 3px; width: 10px; height: 10px; margin-top: -5px; pointer-events: none; }
+  .jr-here::before {
+    content: ""; position: absolute; inset: 0; background: var(--accent); transform: rotate(45deg); border-radius: 2px;
+    animation: here-pulse 1.6s ease-in-out infinite;
+  }
+  .jr-here[hidden] { display: none; }
+  .jr-here span {
+    position: absolute; right: 18px; top: 50%; transform: translateY(-50%);
+    white-space: nowrap; font-family: 'JetBrains Mono', monospace; font-size: 0.58rem; letter-spacing: 0.1em;
+    text-transform: uppercase; color: var(--accent); background: var(--bg); padding: 0.1rem 0.35rem; border-radius: 3px;
+  }
+  @keyframes here-pulse { 0%, 100% { box-shadow: 0 0 6px rgba(232, 169, 74, 0.4); } 50% { box-shadow: 0 0 14px rgba(232, 169, 74, 0.85); } }
+  @media (prefers-reduced-motion: reduce) { .return-chip.in, .jr-here::before { animation: none; } }
