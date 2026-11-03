@@ -8,6 +8,10 @@ let currentGeneName = "";
 let currentProteinLength = 0;
 let highlightedDomain = null;
 
+const RECENT_KEY = "gene-explorer-recent";
+const MAX_RECENT = 6;
+const MAX_VARIANT_CARDS = 60;
+
 const CACHE_KEY = "gene-explorer-cache-v1";
 const CACHE_TTL_MS = 24 * 60 * 60 * 1000;
 const REQUEST_TIMEOUT_MS = 20000;
@@ -122,6 +126,7 @@ function resetResultPanels() {
   document.getElementById("ideoContainer").innerHTML = "";
   document.getElementById("ideoHint").textContent = "";
   document.getElementById("ideoLocText").textContent = "";
+  resetExtraSections();
   highlightedDomain = null;
   currentProteinLength = 0;
   currentPdbData = "";
@@ -164,6 +169,22 @@ window.addEventListener("load", () => {
     const toggle = e.target.closest(".collapsible-toggle");
     if (toggle) toggleCollapsible(toggle.dataset.target);
   });
+
+  // Recent-search chips and interaction-partner chips both load a gene on click
+  ["recentRow", "partnerList"].forEach(id => {
+    document.getElementById(id)?.addEventListener("click", e => {
+      const chip = e.target.closest(".gene-chip");
+      if (chip?.dataset.gene) searchGene(chip.dataset.gene);
+    });
+  });
+  renderRecent();
+
+  // Shareable links: ?gene=FMR1 loads that gene straight away
+  const geneParam = new URLSearchParams(window.location.search).get("gene");
+  if (geneParam) {
+    document.getElementById("geneInput").value = geneParam;
+    loadGene();
+  }
 });
 
 function attachGentleZoom(el, getViewer) {
@@ -368,9 +389,9 @@ function renderInterPro(entries, proteinLength) {
   hint.textContent = "Click a domain bar or card to highlight it on the 3D structure above · ctrl/cmd-click a bar to open its InterPro entry instead.";
 }
 
-async function fetchGenomicLocation(geneId, signal) {
+async function fetchNcbiGene(geneId, signal) {
   if (!geneId || geneId === "-") return null;
-  const key = cacheKey("ncbi-location", geneId);
+  const key = cacheKey("ncbi-gene", geneId);
   const cached = cacheGet(key);
   if (cached) return cached;
   const url = `https://eutils.ncbi.nlm.nih.gov/entrez/eutils/esummary.fcgi?db=gene&id=${geneId}&retmode=json`;
@@ -378,14 +399,20 @@ async function fetchGenomicLocation(geneId, signal) {
   const data = await res.json();
   const doc = data.result?.[geneId];
   if (!doc) return null;
+
+  const summary = typeof doc.summary === "string" ? doc.summary.trim() : "";
+  let loc = null;
   const gi = (doc.genomicinfo || [])[0];
   const chr = doc.chromosome || gi?.chrloc;
-  if (!chr || !gi) return null;
-  const a = parseInt(gi.chrstart, 10), b = parseInt(gi.chrstop, 10);
-  if (isNaN(a) || isNaN(b)) return null;
-  const loc = { chr: String(chr), mapLocation: doc.maplocation || "", start: Math.min(a,b), stop: Math.max(a,b) };
-  cacheSet(key, loc);
-  return loc;
+  if (chr && gi) {
+    const a = parseInt(gi.chrstart, 10), b = parseInt(gi.chrstop, 10);
+    if (!isNaN(a) && !isNaN(b)) {
+      loc = { chr: String(chr), mapLocation: doc.maplocation || "", start: Math.min(a, b), stop: Math.max(a, b) };
+    }
+  }
+  const result = { loc, summary };
+  cacheSet(key, result);
+  return result;
 }
 
 
@@ -621,9 +648,14 @@ async function loadGene() {
 
     const ss = computeSecondaryStructureStats();
 
+    // Variants, partners and expression load in the background, each in its
+    // own section, so a slow or failing API never blocks the main result.
+    loadExtras(gene, accession, length, requestId, signal);
+
     // The core result is usable even if enrichment APIs fail.
     let refsHtml = "No linked publications found.";
     let geneId = "-";
+    let ncbiSummary = "";
     setStatus("Loading annotations and references…", false, true);
     setProgress(2);
 
@@ -678,8 +710,9 @@ async function loadGene() {
     setStatus("Loading genomic location…", false, true);
 
     try {
-      const loc = await fetchGenomicLocation(geneId, signal);
-      if (isCurrentRequest(requestId)) renderIdeogram(loc, gene, geneId);
+      const ncbi = await fetchNcbiGene(geneId, signal);
+      ncbiSummary = ncbi?.summary || "";
+      if (isCurrentRequest(requestId)) renderIdeogram(ncbi?.loc || null, gene, geneId);
     } catch (e) {
       if (e.name === "AbortError") throw e;
       console.error("Genomic location fetch failed:", e);
@@ -698,6 +731,7 @@ async function loadGene() {
       { label: "Subcellular location", value: escapeHtml(subcellText) },
       { label: "Length / mass", value: `${length} aa · ${escapeHtml(mass)}`, mono: true },
       { label: "Secondary structure", value: ss ? `${ss.helix}% helix · ${ss.sheet}% sheet · ${ss.coil}% coil · click to expand` : "-", mono: true, collapsible: true, id: "ssField", detail: ssDetailHtml(ss) },
+      ...(ncbiSummary ? [{ label: "Gene summary (NCBI)", value: escapeHtml(ncbiSummary), scroll: true, wide: true }] : []),
       { label: "Function", value: escapeHtml(functionText), scroll: true, wide: true },
       { label: "Disease association", value: escapeHtml(diseaseText), wide: true },
       { label: "Referenced papers", value: refsHtml, scroll: true, wide: true }
@@ -705,6 +739,8 @@ async function loadGene() {
     renderLearnLinks(gene, accession, geneId);
     setProgress(5);
     setStatus("Loaded successfully.");
+    addRecent(gene);
+    try { history.replaceState(null, "", `?gene=${encodeURIComponent(gene)}`); } catch { /* ignore */ }
   } catch (err) {
     if (err.name === "AbortError") return;
     console.error(err);
@@ -766,13 +802,17 @@ function reapplyDomainHighlight() {
   } else {
     viewer.setStyle(outside, { [styleMode]: { color: GREY } });
   }
+  // Single residues (variants) are hard to see in cartoon, so show their side chains
+  if (styleMode === "cartoon" && highlightedDomain.end - highlightedDomain.start <= 2) {
+    viewer.addStyle(sel, { stick: { radius: 0.25 } });
+  }
   viewer.render();
 }
 
 function highlightDomain(entry, fragment, sourceEl) {
   if (!viewer || !model) return;
 
-  document.querySelectorAll(".domain-bar.active, .interpro-item.active").forEach(el => el.classList.remove("active"));
+  document.querySelectorAll(".domain-bar.active, .interpro-item.active, .variant-tick.active").forEach(el => el.classList.remove("active"));
 
   const isSame = highlightedDomain
     && highlightedDomain.accession === entry.accession
@@ -800,13 +840,14 @@ function highlightDomain(entry, fragment, sourceEl) {
   const coversMost = total > 0 && span / total > 0.8;
 
   document.getElementById("residueBar").innerHTML =
-    `<strong>${escapeHtml(entry.name)}</strong> · ${escapeHtml(entry.accession)} · ` +
-    `residues ${fragment.start}-${fragment.end} in color, rest greyed out` +
+    `<strong>${escapeHtml(entry.name)}</strong> · ${escapeHtml(entry.displayId ?? entry.accession)} · ` +
+    (fragment.start === fragment.end ? `residue ${fragment.start}` : `residues ${fragment.start}-${fragment.end}`) + ` in color, rest greyed out` +
     (coversMost ? ` · note: this entry spans ~${Math.round((span / total) * 100)}% of the protein` : "") +
     ` · click again to clear`;
 
   // Fly the camera to the highlighted residues
-  viewer.zoomTo({ resi: `${fragment.start}-${fragment.end}` }, 600);
+  const zoomPad = fragment.end - fragment.start < 12 ? 6 : 0;
+  viewer.zoomTo({ resi: `${Math.max(1, fragment.start - zoomPad)}-${fragment.end + zoomPad}` }, 600);
   viewer.render();
 
   document.getElementById("viewer")?.scrollIntoView({ behavior: "smooth", block: "center" });
@@ -844,4 +885,320 @@ function downloadPNG() {
   a.href = uri;
   a.download = `${currentGeneName || "structure"}.png`;
   a.click();
+}
+
+
+/* ---------------------------------------------------------------------------
+   Extra sections: recent searches, disease variants, partners, expression
+--------------------------------------------------------------------------- */
+
+function searchGene(name) {
+  document.getElementById("geneInput").value = name;
+  window.scrollTo({ top: 0, behavior: "smooth" });
+  loadGene();
+}
+
+function getRecent() {
+  try {
+    const list = JSON.parse(localStorage.getItem(RECENT_KEY) || "[]");
+    return Array.isArray(list) ? list.filter(g => typeof g === "string") : [];
+  } catch { return []; }
+}
+
+function addRecent(gene) {
+  const list = [gene, ...getRecent().filter(g => g !== gene)].slice(0, MAX_RECENT);
+  try { localStorage.setItem(RECENT_KEY, JSON.stringify(list)); } catch { /* ignore */ }
+  renderRecent();
+}
+
+function renderRecent() {
+  const row = document.getElementById("recentRow");
+  if (!row) return;
+  const list = getRecent();
+  row.hidden = list.length === 0;
+  row.innerHTML = list.length
+    ? `<span class="control-label">RECENT</span>` +
+      list.map(g => `<button type="button" class="gene-chip" data-gene="${escapeHtml(g)}">${escapeHtml(g)}</button>`).join("")
+    : "";
+}
+
+function resetExtraSections() {
+  ["variantSection", "partnerSection", "exprSection"].forEach(id => {
+    const el = document.getElementById(id);
+    if (el) el.hidden = true;
+  });
+  ["variantMeta", "variantHint", "partnerMeta", "exprMeta"].forEach(id => {
+    const el = document.getElementById(id);
+    if (el) el.textContent = "";
+  });
+  ["variantMap", "variantScale", "variantList", "partnerList", "exprList", "exprHint"].forEach(id => {
+    const el = document.getElementById(id);
+    if (el) el.innerHTML = "";
+  });
+}
+
+function loadExtras(gene, accession, length, requestId, signal) {
+  runExtra("variant", "disease variants", () => fetchDiseaseVariants(accession, signal), v => renderVariants(v, length), requestId);
+  runExtra("partner", "interaction partners", () => fetchPartners(gene, signal), renderPartners, requestId);
+  runExtra("expr", "tissue expression", () => fetchExpression(gene, signal), rows => renderExpression(rows, gene), requestId);
+}
+
+async function runExtra(prefix, label, fetcher, renderer, requestId) {
+  const section = document.getElementById(`${prefix}Section`);
+  const meta = document.getElementById(`${prefix}Meta`);
+  if (!section || !meta) return;
+  section.hidden = false;
+  meta.textContent = `Loading ${label}…`;
+  try {
+    const data = await fetcher();
+    if (isCurrentRequest(requestId)) renderer(data);
+  } catch (e) {
+    if (e.name === "AbortError" || !isCurrentRequest(requestId)) return;
+    console.error(`${label} failed:`, e);
+    meta.textContent = "";
+    const target = document.getElementById(prefix === "partner" ? "partnerList" : `${prefix}List`);
+    if (target) target.innerHTML = `<div class="error-note">Couldn't load ${label} right now. The rest of the gene result is unaffected.</div>`;
+  }
+}
+
+/* ---- Disease variants (EBI Proteins API: UniProt + ClinVar) ---- */
+
+async function fetchDiseaseVariants(accession, signal) {
+  const key = cacheKey("variants", accession);
+  const cached = cacheGet(key);
+  if (cached) return cached;
+
+  const res = await apiFetch(
+    `https://www.ebi.ac.uk/proteins/api/variation/${encodeURIComponent(accession)}`,
+    { headers: { Accept: "application/json" } },
+    { signal }
+  );
+  const data = await res.json();
+  const byChange = new Map();
+
+  (data.features || []).forEach(f => {
+    const pos = Number(f.begin);
+    if (!Number.isFinite(pos) || pos < 1) return;
+
+    const sigs = (f.clinicalSignificances || [])
+      .map(c => String(c.type || ""))
+      .filter(t => /pathogenic/i.test(t) && !/conflicting|benign/i.test(t));
+    const diseases = (f.association || [])
+      .filter(a => a.disease && a.name)
+      .map(a => String(a.name));
+    if (!sigs.length && !diseases.length) return;
+
+    const wt = String(f.wildType || "");
+    const mt = String(f.alternativeSequence ?? f.mutatedType ?? "");
+    const rs = (f.xrefs || []).map(x => String(x.id || "")).find(id => /^rs\d+$/i.test(id)) || "";
+    const k = `${pos}:${wt}>${mt}`;
+
+    const v = byChange.get(k) || { pos, wt, mt, sigs: new Set(), diseases: new Set(), rs: "" };
+    sigs.forEach(t => v.sigs.add(t));
+    diseases.forEach(d => v.diseases.add(d));
+    if (!v.rs && rs) v.rs = rs;
+    byChange.set(k, v);
+  });
+
+  const variants = [...byChange.values()].map(v => {
+    const sigs = [...v.sigs];
+    let significance = "Disease-associated (UniProt)";
+    if (sigs.some(t => /^pathogenic$/i.test(t.trim()))) significance = "Pathogenic";
+    else if (sigs.some(t => /likely pathogenic/i.test(t))) significance = "Likely pathogenic";
+    else if (sigs.length) significance = sigs[0];
+    return { pos: v.pos, wt: v.wt, mt: v.mt, rs: v.rs, significance, diseases: [...v.diseases] };
+  }).sort((a, b) => a.pos - b.pos);
+
+  cacheSet(key, variants);
+  return variants;
+}
+
+function variantLabel(v) {
+  const short = s => (s.length > 4 ? s.slice(0, 4) + "…" : s);
+  return `${short(v.wt) || "?"}${v.pos}${short(v.mt) || "?"}`;
+}
+
+function highlightVariant(v, el) {
+  const label = variantLabel(v);
+  highlightDomain(
+    {
+      accession: `VAR-${v.pos}-${v.wt}-${v.mt}`,
+      displayId: v.rs || v.significance,
+      name: v.diseases[0] ? `${label} · ${v.diseases[0]}` : label
+    },
+    { start: v.pos, end: v.pos },
+    el
+  );
+}
+
+function renderVariants(variants, proteinLength) {
+  const meta = document.getElementById("variantMeta");
+  const map = document.getElementById("variantMap");
+  const scale = document.getElementById("variantScale");
+  const list = document.getElementById("variantList");
+  const hint = document.getElementById("variantHint");
+  map.innerHTML = "";
+  scale.innerHTML = "";
+  list.innerHTML = "";
+  hint.textContent = "";
+
+  if (!variants?.length) {
+    map.style.display = "none";
+    meta.textContent = "No pathogenic or disease-associated variants are listed for this protein.";
+    return;
+  }
+  map.style.display = "";
+
+  const length = Number(proteinLength) || Math.max(1, ...variants.map(v => v.pos));
+  const positions = new Set(variants.map(v => v.pos)).size;
+  meta.textContent = `${variants.length} pathogenic / disease-associated variant${variants.length === 1 ? "" : "s"} at ${positions} position${positions === 1 ? "" : "s"} · sources: UniProt, ClinVar`;
+
+  const track = document.createElement("div");
+  track.className = "domain-track";
+  map.appendChild(track);
+
+  variants.forEach(v => {
+    const tick = document.createElement("div");
+    tick.className = "variant-tick";
+    tick.style.left = `${Math.max(0, Math.min(100, ((v.pos - 0.5) / length) * 100))}%`;
+    tick.dataset.domainKey = `VAR-${v.pos}-${v.wt}-${v.mt}:${v.pos}-${v.pos}`;
+    tick.tabIndex = 0;
+    tick.setAttribute("role", "button");
+    tick.title = `${variantLabel(v)} · ${v.significance}${v.diseases[0] ? " · " + v.diseases[0] : ""}`;
+    tick.setAttribute("aria-label", `${tick.title}. Click to show on the 3D structure.`);
+    tick.addEventListener("click", () => highlightVariant(v, tick));
+    tick.addEventListener("keydown", e => {
+      if (e.key === "Enter" || e.key === " ") { e.preventDefault(); highlightVariant(v, tick); }
+    });
+    track.appendChild(tick);
+  });
+
+  const s1 = document.createElement("span"); s1.textContent = "1 aa";
+  const s2 = document.createElement("span"); s2.textContent = `${length} aa`;
+  scale.append(s1, s2);
+
+  variants.slice(0, MAX_VARIANT_CARDS).forEach(v => {
+    const item = document.createElement("div");
+    item.className = "interpro-item clickable";
+    item.tabIndex = 0;
+    item.setAttribute("role", "button");
+    item.dataset.domainKey = `VAR-${v.pos}-${v.wt}-${v.mt}:${v.pos}-${v.pos}`;
+    const rsLink = v.rs
+      ? `<a href="https://www.ncbi.nlm.nih.gov/snp/${encodeURIComponent(v.rs)}" target="_blank" rel="noopener">${escapeHtml(v.rs)}</a>`
+      : `<span class="interpro-type">no rsID</span>`;
+    item.innerHTML = `
+      <div class="interpro-item-head">
+        ${rsLink}
+        <span class="interpro-type">${escapeHtml(v.significance)}</span>
+      </div>
+      <div class="interpro-name">${escapeHtml(variantLabel(v))}${v.diseases.length ? " · " + escapeHtml(v.diseases.join("; ")) : ""}</div>
+      <div class="interpro-range">residue ${v.pos}</div>
+    `;
+    item.addEventListener("click", e => {
+      if (e.target.closest("a")) return;
+      highlightVariant(v, item);
+    });
+    item.addEventListener("keydown", e => {
+      if (e.key === "Enter" || e.key === " ") { e.preventDefault(); highlightVariant(v, item); }
+    });
+    list.appendChild(item);
+  });
+
+  hint.textContent = (variants.length > MAX_VARIANT_CARDS
+    ? `Showing the first ${MAX_VARIANT_CARDS} of ${variants.length} by position · every variant is marked on the track · `
+    : "") + "Click a tick or card to show that residue on the 3D structure.";
+}
+
+/* ---- Interaction partners (STRING) ---- */
+
+async function fetchPartners(gene, signal) {
+  const key = cacheKey("string", gene);
+  const cached = cacheGet(key);
+  if (cached) return cached;
+
+  const url = `https://string-db.org/api/json/interaction_partners?identifiers=${encodeURIComponent(gene)}&species=9606&limit=12&caller_identity=gene-explorer`;
+  const res = await apiFetch(url, {}, { signal });
+  const data = await res.json();
+  const seen = new Set();
+  const partners = (Array.isArray(data) ? data : [])
+    .map(r => ({ name: String(r.preferredName_B || ""), score: Number(r.score) }))
+    .filter(p => p.name && p.name.toUpperCase() !== gene && Number.isFinite(p.score))
+    .sort((a, b) => b.score - a.score)
+    .filter(p => (seen.has(p.name) ? false : seen.add(p.name)))
+    .slice(0, 10);
+
+  cacheSet(key, partners);
+  return partners;
+}
+
+function renderPartners(partners) {
+  const meta = document.getElementById("partnerMeta");
+  const list = document.getElementById("partnerList");
+  list.innerHTML = "";
+  if (!partners?.length) {
+    meta.textContent = "No interaction partners found in STRING for this gene.";
+    return;
+  }
+  meta.textContent = "Top functional partners from STRING (combined score 0–1) · click one to explore it";
+  list.innerHTML = partners.map(p =>
+    `<button type="button" class="gene-chip" data-gene="${escapeHtml(p.name)}" title="STRING combined score ${p.score.toFixed(3)}">` +
+    `${escapeHtml(p.name)}<span class="chip-score">${p.score.toFixed(2)}</span></button>`
+  ).join("");
+}
+
+/* ---- Tissue expression (GTEx) ---- */
+
+async function fetchExpression(gene, signal) {
+  const key = cacheKey("gtex", gene);
+  const cached = cacheGet(key);
+  if (cached) return cached;
+
+  const refRes = await apiFetch(
+    `https://gtexportal.org/api/v2/reference/gene?geneId=${encodeURIComponent(gene)}`,
+    { headers: { Accept: "application/json" } },
+    { signal }
+  );
+  const refData = await refRes.json();
+  const gencodeId = (refData.data || []).find(g => String(g.geneSymbol || "").toUpperCase() === gene)?.gencodeId
+    || refData.data?.[0]?.gencodeId;
+  if (!gencodeId) { cacheSet(key, []); return []; }
+
+  const expRes = await apiFetch(
+    `https://gtexportal.org/api/v2/expression/medianGeneExpression?gencodeId=${encodeURIComponent(gencodeId)}&datasetId=gtex_v8`,
+    { headers: { Accept: "application/json" } },
+    { signal }
+  );
+  const expData = await expRes.json();
+  const rows = (expData.data || [])
+    .map(r => ({
+      tissue: String(r.tissueSiteDetailId || "").replace(/_+/g, " ").replace(/\s+-\s+/g, " – ").trim(),
+      median: Number(r.median)
+    }))
+    .filter(r => r.tissue && Number.isFinite(r.median))
+    .sort((a, b) => b.median - a.median);
+
+  cacheSet(key, rows);
+  return rows;
+}
+
+function renderExpression(rows, gene) {
+  const meta = document.getElementById("exprMeta");
+  const list = document.getElementById("exprList");
+  const hint = document.getElementById("exprHint");
+  list.innerHTML = "";
+  hint.innerHTML = "";
+  if (!rows?.length) {
+    meta.textContent = "No GTEx expression data found for this gene.";
+    return;
+  }
+  const top = rows.slice(0, 10);
+  const max = Math.max(...top.map(r => r.median), 0.0001);
+  meta.textContent = `Median expression across ${rows.length} GTEx tissues (TPM) · top ${top.length} shown`;
+  list.innerHTML = top.map(r => `
+    <div class="expr-row">
+      <div class="expr-label">${escapeHtml(r.tissue)} · ${r.median.toFixed(1)} TPM</div>
+      <div class="ss-bar-track"><div class="ss-bar-fill" style="width:${((r.median / max) * 100).toFixed(1)}%;background:var(--accent)"></div></div>
+    </div>
+  `).join("");
+  hint.innerHTML = `Full profile: <a class="ext-link" href="https://gtexportal.org/home/gene/${encodeURIComponent(gene)}" target="_blank" rel="noopener">GTEx Portal →</a>`;
 }
