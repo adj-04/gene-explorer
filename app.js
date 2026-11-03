@@ -1,4 +1,3 @@
-
 "use strict";
 
 let viewer = null;
@@ -165,7 +164,7 @@ window.addEventListener("load", () => {
     const toggle = e.target.closest(".collapsible-toggle");
     if (toggle) toggleCollapsible(toggle.dataset.target);
   });
-});;
+});
 
 function attachGentleZoom(el, getViewer) {
   el.addEventListener("wheel", (e) => {
@@ -786,6 +785,8 @@ function highlightDomain(entry, fragment, sourceEl) {
   if (isSame) {
     highlightedDomain = null;
     document.getElementById("residueBar").textContent = "Click any residue in the structure to inspect it.";
+    viewer.zoomTo({}, 600); // fly back out to the whole protein
+    viewer.render();
     return;
   }
 
@@ -805,7 +806,26 @@ function highlightDomain(entry, fragment, sourceEl) {
     (coversMost ? ` · note: this entry spans ~${Math.round((span / total) * 100)}% of the protein` : "") +
     ` · click again to clear`;
 
-  document.getElementById("viewer")?.scrollIntoView({ behavior: "smooth", block: "center" });
+  // Stop spinning so the domain stays in view
+  if (spinning) {
+    spinning = false;
+    viewer.spin(false);
+    const spinToggle = document.getElementById("spinToggle");
+    if (spinToggle) spinToggle.checked = false;
+  }
+
+  // Fly the camera to the highlighted residues
+  viewer.zoomTo({ resi: `${fragment.start}-${fragment.end}` }, 600);
+  viewer.render();
+
+  // Scroll up and briefly flash the viewer so it's obvious what changed
+  const viewerEl = document.getElementById("viewer");
+  if (viewerEl) {
+    viewerEl.scrollIntoView({ behavior: "smooth", block: "center" });
+    viewerEl.classList.remove("domain-flash");
+    void viewerEl.offsetWidth; // restart the animation on repeated clicks
+    viewerEl.classList.add("domain-flash");
+  }
 }
 
 function toggleSpin() {
