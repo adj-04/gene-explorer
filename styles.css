@@ -1,4 +1,4 @@
-  :root {
+:root {
     --bg: #0a0a0a;
     --panel: #131311;
     --border: #262622;
@@ -224,8 +224,26 @@
     .controls button { width: 100%; }
     #viewer { height: 420px; }
   }
-  #viewer.domain-flash { animation: domain-flash 1.2s ease-out; }
-  @keyframes domain-flash {
-    0%   { box-shadow: 0 0 0 3px #ff4d4d; }
-    100% { box-shadow: 0 0 0 0 rgba(255, 77, 77, 0); }
+
+  /* Recent searches, disease variants, interaction partners, tissue expression */
+  .recent-row { display: flex; align-items: center; gap: 0.5rem; flex-wrap: wrap; margin: -0.3rem 0 1.1rem; }
+  .recent-row[hidden], .extra-section[hidden] { display: none; }
+  .extra-section { margin-top: 2.5rem; border-top: 1px solid var(--border); padding-top: 1.5rem; }
+  .chip-row { display: flex; flex-wrap: wrap; gap: 0.5rem; }
+  .gene-chip {
+    background: transparent; color: var(--text-dim); border: 1px solid var(--border);
+    font-family: 'JetBrains Mono', monospace; font-weight: 500; font-size: 0.75rem;
+    padding: 0.3rem 0.65rem; border-radius: 4px; cursor: pointer;
   }
+  .gene-chip:hover { background: transparent; border-color: var(--accent); color: var(--accent); }
+  .gene-chip .chip-score { margin-left: 0.45rem; opacity: 0.65; font-size: 0.68rem; }
+  .variant-tick {
+    position: absolute; top: -5px; width: 3px; height: 20px; margin-left: -1px; border-radius: 1px;
+    background: #e07a5f; opacity: 0.85; cursor: pointer;
+  }
+  .variant-tick:hover, .variant-tick:focus { opacity: 1; outline: 2px solid var(--accent); outline-offset: 1px; }
+  .variant-tick.active { background: #ff4d4d; box-shadow: 0 0 0 2px #ff4d4d; opacity: 1; }
+  .expr-row { margin-bottom: 0.6rem; }
+  .expr-label { font-family: 'JetBrains Mono', monospace; font-size: 0.72rem; color: var(--text-dim); margin-bottom: 0.25rem; }
+  .ext-link { color: var(--accent); text-decoration: none; }
+  .ext-link:hover { text-decoration: underline; }
