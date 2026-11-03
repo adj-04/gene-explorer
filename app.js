@@ -11,7 +11,6 @@ let highlightedDomain = null;
 const helixData = { gene: "", length: 0, domains: [], variants: [], cds: "", transcript: "", cdsMatches: null, cdsState: "" };
 let requestHelixDraw = () => {};
 let focusHelix = () => {};
-let setRailMarker = () => {};
 
 const RECENT_KEY = "gene-explorer-recent";
 const MAX_RECENT = 3;
@@ -133,7 +132,6 @@ function resetResultPanels() {
   document.getElementById("ideoHint").textContent = "";
   document.getElementById("ideoLocText").textContent = "";
   resetExtraSections();
-  returnNav.clear();
   Object.assign(helixData, { gene: "", length: 0, domains: [], variants: [], cds: "", transcript: "", cdsMatches: null, cdsState: "" });
   requestHelixDraw();
   highlightedDomain = null;
@@ -902,93 +900,8 @@ function highlightDomain(entry, fragment, sourceEl) {
   viewer.zoomTo({ resi: `${Math.max(1, fragment.start - zoomPad)}-${fragment.end + zoomPad}` }, 600);
   viewer.render();
 
-  // Don't yank the page up to the viewer; offer a way there (and back) instead
-  returnNav.offerStructure();
+  document.getElementById("viewer")?.scrollIntoView({ behavior: "smooth", block: "center" });
 }
-
-/* "See it on the structure" / "Back to where you were" chip, plus a
-   you-were-here marker on the section rail while you're away. */
-const returnNav = (() => {
-  let chip = null, returnY = null, arrived = false, hideTimer = 0;
-
-  const viewerInView = () => {
-    const r = document.getElementById("viewer")?.getBoundingClientRect();
-    return !!r && r.bottom > 80 && r.top < window.innerHeight - 80;
-  };
-
-  function ensure() {
-    if (chip) return;
-    chip = document.createElement("button");
-    chip.type = "button";
-    chip.className = "return-chip";
-    chip.hidden = true;
-    document.body.appendChild(chip);
-    chip.addEventListener("click", onChip);
-    window.addEventListener("scroll", onScroll, { passive: true });
-  }
-
-  function show(text, mode) {
-    chip.textContent = text;
-    chip.dataset.mode = mode;
-    chip.hidden = false;
-    chip.classList.remove("in");
-    void chip.offsetWidth;
-    chip.classList.add("in");
-  }
-
-  function hide() {
-    clearTimeout(hideTimer);
-    if (chip) chip.hidden = true;
-  }
-
-  function clear() {
-    returnY = null;
-    arrived = false;
-    setRailMarker(null);
-    hide();
-  }
-
-  function offerStructure() {
-    ensure();
-    if (viewerInView()) return;
-    clear();
-    show("▲ See it on the 3D structure", "go");
-    hideTimer = setTimeout(() => { if (chip.dataset.mode === "go") hide(); }, 7000);
-  }
-
-  function goToStructure() {
-    ensure();
-    returnY = window.scrollY;
-    arrived = false;
-    setRailMarker(returnY);
-    document.getElementById("viewer")?.scrollIntoView({ behavior: "smooth", block: "center" });
-    clearTimeout(hideTimer);
-    show("▼ Back to where you were", "back");
-  }
-
-  function goBack() {
-    if (returnY === null) return;
-    const y = returnY;
-    clear();
-    window.scrollTo({ top: y, behavior: "smooth" });
-  }
-
-  function onChip() {
-    if (chip.dataset.mode === "go") goToStructure();
-    else goBack();
-  }
-
-  function onScroll() {
-    if (!chip || chip.hidden) return;
-    if (chip.dataset.mode === "go" && viewerInView()) { hide(); return; }
-    if (chip.dataset.mode === "back" && returnY !== null) {
-      if (!arrived) { if (viewerInView()) arrived = true; return; }
-      if (Math.abs(window.scrollY - returnY) < 150) clear(); // made it back on their own
-    }
-  }
-
-  return { offerStructure, goBack, clear, hasReturn: () => returnY !== null };
-})();
 
 function toggleSpin() {
   spinning = document.getElementById("spinToggle").checked;
@@ -1392,15 +1305,6 @@ function renderExpression(rows, gene) {
 
   let rail, railInner, fill, win, zone, pill, pillLabel, pillBar, menu;
   let nearItem = null;
-  let here = null, hereY = null;
-
-  function placeHere() {
-    if (!here) return;
-    here.hidden = hereY === null;
-    if (hereY === null) return;
-    const railH = railInner.clientHeight || 1;
-    here.style.top = `${(hereY + window.innerHeight / 2) / docHeight() * railH}px`;
-  }
   let drag = null;
   const NEAR_PX = 36;      // how close (vertically) the cursor must be to a dot to reveal its name
   let items = [];
@@ -1451,17 +1355,12 @@ function renderExpression(rows, gene) {
     rail.className = "jump-rail";
     rail.setAttribute("aria-label", "Jump to section");
     rail.hidden = true;
-    rail.innerHTML = `<div class="jr-inner"><div class="jr-track"></div><div class="jr-fill"></div><div class="jr-window"></div><div class="jr-here" hidden><span>you were here</span></div><div class="jr-zone"></div></div>`;
+    rail.innerHTML = `<div class="jr-inner"><div class="jr-track"></div><div class="jr-fill"></div><div class="jr-window"></div><div class="jr-zone"></div></div>`;
     railInner = rail.querySelector(".jr-inner");
     fill = rail.querySelector(".jr-fill");
     win = rail.querySelector(".jr-window");
     zone = rail.querySelector(".jr-zone");
-    here = rail.querySelector(".jr-here");
     wireZone();
-    setRailMarker = y => {
-      hereY = y;
-      placeHere();
-    };
 
     pill = document.createElement("div");
     pill.className = "jump-pill";
@@ -1550,9 +1449,7 @@ function renderExpression(rows, gene) {
     const end = e => {
       if (!drag) return;
       const y = railY(e);
-      if (!drag.moved && hereY !== null && Math.abs(y - (parseFloat(here.style.top) || -99)) <= 10) {
-        returnNav.goBack();
-      } else if (!drag.moved) {
+      if (!drag.moved) {
         const it = nearest(y, 16);
         if (it) go(it);
         else {
@@ -1635,7 +1532,6 @@ function renderExpression(rows, gene) {
       last = y;
       it.item.style.top = `${y}px`;
     });
-    placeHere();
     update();
   }
 
@@ -1831,9 +1727,12 @@ async function loadCds(gene, accession, fullData, requestId, signal) {
   let wrap, canvas, ctx, tipMain, tipSub, legend, H = 0, raf = 0, lastFrame = 0;
   let offset = 0, spin = 0, hoverBp = -1, flags = null, varByRes = new Map(), domByRes = [];
   let lastCaption = "";
-  let focus = null; // { res, source, y0 } — a single residue lit from the structure or a map
-  let manual = null; // { offset, y0 } — set by the up/down buttons
-  let upBtn, downBtn;
+  let focus = null;   // { res, source } — a single residue lit from the structure or a map
+  let pos = 0;        // where the helix sits (bp offset of the top rung); only the user or a jump moves it
+  let pin = null;     // bp offset you were at before the last jump — shown as a pin on the slider
+  let lastHl = "";    // detects a new highlight so the helix can jump to it
+  let lastCds = "";
+  let slider, sMarks, sThumb, sPin, sDrag = null;
 
   const visibleBp = () => Math.max(1, Math.floor((H - TOP * 2) / STEP));
 
@@ -1857,20 +1756,7 @@ async function loadCds(gene, accession, fullData, requestId, signal) {
     const len = helixData.cds.length;
     const n = visibleBp();
     const maxOff = Math.max(0, len - n);
-    if (manual) return Math.min(maxOff, Math.max(0, manual.offset));
-    if (focus) {
-      const mid = (focus.res - 1) * 3 + 1.5;
-      return Math.min(maxOff, Math.max(0, mid - n / 2));
-    }
-    if (highlightedDomain) {
-      const a = (highlightedDomain.start - 1) * 3;
-      const b = highlightedDomain.end * 3;
-      const t = b - a <= n ? (a + b) / 2 - n / 2 : a - 3;
-      return Math.min(maxOff, Math.max(0, t));
-    }
-    const docH = document.documentElement.scrollHeight;
-    const progress = Math.min(1, Math.max(0, window.scrollY / Math.max(1, docH - window.innerHeight)));
-    return progress * maxOff;
+    return Math.min(maxOff, Math.max(0, pos));
   }
 
   function resize() {
@@ -1989,7 +1875,7 @@ async function loadCds(gene, accession, fullData, requestId, signal) {
     ctx.globalAlpha = 1;
 
     if (hoverBp < 0) idleCaption();
-    updateButtons();
+    updateSlider();
   }
 
   function setTip(main, sub, accent) {
@@ -2077,44 +1963,127 @@ async function loadCds(gene, accession, fullData, requestId, signal) {
     );
   }
 
-  /* Up/down buttons: step one codon per click, hold to keep moving */
+  /* Position, jumps and the "you were here" pin ------------------------- */
   function maxOffset() { return Math.max(0, helixData.cds.length - visibleBp()); }
+  const clampPos = v => Math.min(maxOffset(), Math.max(0, v));
 
-  function step(dir) {
+  // Move the helix. A jump (highlight / structure click) leaves a pin where you were.
+  function moveTo(next, { jump = false } = {}) {
     if (!helixData.cds) return;
-    const from = manual ? manual.offset : Math.round(offset);
-    const next = Math.min(maxOffset(), Math.max(0, from + dir * 3));
-    manual = { offset: next, y0: window.scrollY };
-    focus = null;
+    next = clampPos(next);
+    if (!jump) focus = null; // scrubbing away from a lit codon
+    if (jump && Math.abs(next - pos) > visibleBp() / 2) pin = pos;
+    pos = next;
+    if (pin !== null && Math.abs(pin - pos) < 3) pin = null; // back where you were
     lastCaption = "";
-    updateButtons();
     if (!raf) draw(performance.now(), true);
   }
 
-  function updateButtons() {
-    if (!upBtn) return;
-    const show = !!helixData.cds;
-    upBtn.hidden = downBtn.hidden = !show;
-    wrap.querySelectorAll(".helix-end").forEach(el => { el.hidden = !show; });
-    if (!show) return;
-    const cur = manual ? manual.offset : Math.round(offset);
-    upBtn.disabled = cur <= 0;
-    downBtn.disabled = cur >= maxOffset();
+  function centerOn(startRes, endRes) {
+    const n = visibleBp();
+    const a = (startRes - 1) * 3, b = endRes * 3;
+    return b - a <= n ? (a + b) / 2 - n / 2 : a - 3;
   }
 
-  function wireHold(btn, dir) {
-    let delay = 0, repeat = 0;
-    const stop = () => { clearTimeout(delay); clearInterval(repeat); };
-    btn.addEventListener("pointerdown", e => {
-      if (e.button !== 0 || btn.disabled) return;
+  /* Slider: the whole coding sequence, 5′ at the top and 3′ at the bottom.
+     Drag the thumb (or anywhere on the track) to scrub; scroll the wheel over
+     the helix or slider to move along it; click the pin to go back. */
+  function buildSlider() {
+    slider = document.createElement("div");
+    slider.className = "helix-slider";
+    slider.hidden = true;
+    slider.setAttribute("role", "slider");
+    slider.setAttribute("aria-label", "Position along the coding sequence (5′ to 3′)");
+    slider.tabIndex = 0;
+    slider.innerHTML = `<div class="hs-track"></div><div class="hs-marks"></div><div class="hs-thumb"></div>
+      <button type="button" class="hs-pin" hidden><span></span></button>`;
+    sMarks = slider.querySelector(".hs-marks");
+    sThumb = slider.querySelector(".hs-thumb");
+    sPin = slider.querySelector(".hs-pin");
+
+    const fracAt = e => {
+      const r = slider.getBoundingClientRect();
+      return Math.min(1, Math.max(0, (e.clientY - r.top) / r.height));
+    };
+    slider.addEventListener("pointerdown", e => {
+      if (e.button !== 0 || !helixData.cds || e.target.closest(".hs-pin")) return;
       e.preventDefault();
-      step(dir);
-      delay = setTimeout(() => { repeat = setInterval(() => step(dir), 70); }, 350);
+      slider.setPointerCapture(e.pointerId);
+      const len = helixData.cds.length;
+      const onThumb = e.target === sThumb;
+      // Grab the thumb where you clicked it; clicking the track centres the window there
+      sDrag = { grabOffset: onThumb ? fracAt(e) * len - pos : visibleBp() / 2 };
+      slider.classList.add("dragging");
+      moveTo(fracAt(e) * len - sDrag.grabOffset);
     });
-    ["pointerup", "pointerleave", "pointercancel"].forEach(ev => btn.addEventListener(ev, stop));
-    btn.addEventListener("keydown", e => {
-      if (e.key === "Enter" || e.key === " ") { e.preventDefault(); step(dir); }
+    slider.addEventListener("pointermove", e => {
+      if (!sDrag) return;
+      moveTo(fracAt(e) * helixData.cds.length - sDrag.grabOffset);
     });
+    const end = e => {
+      if (!sDrag) return;
+      sDrag = null;
+      slider.classList.remove("dragging");
+      try { slider.releasePointerCapture(e.pointerId); } catch { /* ignore */ }
+    };
+    slider.addEventListener("pointerup", end);
+    slider.addEventListener("pointercancel", end);
+    slider.addEventListener("keydown", e => {
+      const n = visibleBp();
+      const keys = { ArrowUp: -3, ArrowDown: 3, PageUp: -n, PageDown: n, Home: -Infinity, End: Infinity };
+      if (!(e.key in keys)) return;
+      e.preventDefault();
+      moveTo(Number.isFinite(keys[e.key]) ? pos + keys[e.key] : keys[e.key] < 0 ? 0 : maxOffset());
+    });
+    sPin.addEventListener("click", () => { if (pin !== null) moveTo(pin); });
+    return slider;
+  }
+
+  function onWheel(e) {
+    if (!helixData.cds) return;
+    e.preventDefault();
+    const bp = Math.sign(e.deltaY) * Math.max(3, Math.round(Math.abs(e.deltaY) / 4));
+    moveTo(pos + bp);
+  }
+
+  function renderSliderMarks() {
+    if (!sMarks) return;
+    sMarks.innerHTML = "";
+    const len = helixData.cds.length;
+    if (!len) return;
+    const pct = bp => `${(bp / len) * 100}%`;
+    helixData.domains.forEach(d => {
+      const el = document.createElement("div");
+      el.className = "hs-domain";
+      el.style.top = pct((d.fragment.start - 1) * 3);
+      el.style.height = pct((d.fragment.end - d.fragment.start + 1) * 3);
+      sMarks.appendChild(el);
+    });
+    helixData.variants.forEach(v => {
+      const el = document.createElement("div");
+      el.className = "hs-variant";
+      el.style.top = pct((v.pos - 1) * 3 + 1.5);
+      sMarks.appendChild(el);
+    });
+  }
+
+  function updateSlider() {
+    if (!slider) return;
+    const show = !!helixData.cds;
+    slider.hidden = !show;
+    wrap.querySelectorAll(".helix-end").forEach(el => { el.hidden = !show; });
+    if (!show) return;
+    const len = helixData.cds.length;
+    sThumb.style.top = `${(offset / len) * 100}%`;
+    sThumb.style.height = `${Math.min(100, (visibleBp() / len) * 100)}%`;
+    slider.setAttribute("aria-valuemin", "1");
+    slider.setAttribute("aria-valuemax", String(len));
+    slider.setAttribute("aria-valuenow", String(Math.round(offset) + 1));
+    sPin.hidden = pin === null;
+    if (pin !== null) {
+      sPin.style.top = `${((pin + visibleBp() / 2) / len) * 100}%`;
+      sPin.querySelector("span").textContent = `you were here · c.${Math.round(pin) + 1}`;
+    }
   }
 
   function loop(now) {
@@ -2138,10 +2107,6 @@ async function loadCds(gene, accession, fullData, requestId, signal) {
       <div class="helix-stage"><canvas aria-hidden="true"></canvas></div>
       <div class="helix-end helix-end-bottom" hidden>3′ · end</div>
       <div class="helix-tip"><div class="helix-tip-main"></div><div class="helix-tip-sub"></div></div>
-      <div class="helix-nav">
-        <button type="button" class="helix-btn" data-dir="-1" aria-label="Move toward the start (5′ end)" title="Toward the start (5′)" hidden>&#9650;</button>
-        <button type="button" class="helix-btn" data-dir="1" aria-label="Move toward the end (3′ end)" title="Toward the end (3′)" hidden>&#9660;</button>
-      </div>
       <div class="helix-legend" hidden>
         <span style="color:${BASE_COLORS.A}">A</span><span style="color:${BASE_COLORS.T}">T</span>
         <span style="color:${BASE_COLORS.G}">G</span><span style="color:${BASE_COLORS.C}">C</span>
@@ -2152,26 +2117,29 @@ async function loadCds(gene, accession, fullData, requestId, signal) {
     tipMain = wrap.querySelector(".helix-tip-main");
     tipSub = wrap.querySelector(".helix-tip-sub");
     legend = wrap.querySelector(".helix-legend");
-    [upBtn, downBtn] = wrap.querySelectorAll(".helix-btn");
-    wireHold(upBtn, -1);
-    wireHold(downBtn, 1);
+    wrap.appendChild(buildSlider());
+    canvas.addEventListener("wheel", onWheel, { passive: false });
+    slider.addEventListener("wheel", onWheel, { passive: false });
 
     focusHelix = (res, source) => {
-      focus = res && codonInfo(res) ? { res, source, y0: window.scrollY } : null;
-      if (res) manual = null;
+      focus = res && codonInfo(res) ? { res, source } : null;
       lastCaption = "";
-      if (focus && !wide.matches) return;
-      if (!raf) draw(performance.now(), reduceMotion);
+      if (focus) moveTo(centerOn(res, res), { jump: true });
+      else if (!raf) draw(performance.now(), true);
     };
-    // Scrolling away hands the helix back to scroll-following
-    window.addEventListener("scroll", () => {
-      if (focus && Math.abs(window.scrollY - focus.y0) > 160) { focus = null; lastCaption = ""; }
-      if (manual && Math.abs(window.scrollY - manual.y0) > 160) { manual = null; lastCaption = ""; }
-    }, { passive: true });
 
     requestHelixDraw = () => {
       rebuildFlags();
-      if (!helixData.cds || highlightedDomain) manual = null;
+      if (helixData.cds !== lastCds) {          // new gene / sequence: start at the 5′ end
+        lastCds = helixData.cds;
+        pos = 0; pin = null; focus = null; lastHl = "";
+        renderSliderMarks();
+      } else {
+        renderSliderMarks();
+      }
+      const hl = highlightedDomain ? `${highlightedDomain.start}-${highlightedDomain.end}` : "";
+      if (hl && hl !== lastHl && helixData.cds) moveTo(centerOn(highlightedDomain.start, highlightedDomain.end), { jump: true });
+      lastHl = hl;
       lastCaption = "";
       if (!raf) requestAnimationFrame(() => draw(performance.now(), true));
     };
@@ -2180,7 +2148,6 @@ async function loadCds(gene, accession, fullData, requestId, signal) {
     canvas.addEventListener("mouseleave", onLeave);
     canvas.addEventListener("click", onClick);
     window.addEventListener("resize", resize);
-    if (reduceMotion) window.addEventListener("scroll", () => draw(performance.now(), true), { passive: true });
     document.addEventListener("visibilitychange", syncRunning);
     wide.addEventListener?.("change", () => { resize(); syncRunning(); });
 
