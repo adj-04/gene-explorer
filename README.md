@@ -73,11 +73,16 @@ Type in a gene symbol (e.g. `TP53`, `SHH`, `INS`, `HBB`, `PLAGL2`) and the app w
 - A B-DNA double helix drawn from the gene's real coding sequence (Ensembl
   transcript linked from the UniProt entry): one rung per base pair, colored by
   base, 10.5 bp per turn, with major and minor grooves.
-- Screws along the CDS as you scroll — start codon at the top of the page, stop
-  codon at the bottom. Highlighting a domain, variant, or residue glides it to
-  that region's codons.
+- A slider beside it spans the whole CDS, 5′ start at the top to 3′ end at the
+  bottom: drag the thumb, click anywhere on it, or use the mouse wheel over the
+  helix to move along the sequence. The real start (`ATG`) and stop codons are
+  labelled when in view.
+- Selecting something — a residue on the structure, a spot on the domain or
+  variant map, a domain/variant card, or a base pair on the helix — glides the
+  helix to its codons. A single marker on the slider remembers your last
+  selection; a new selection replaces it, and clicking it jumps back.
 - Domains tint the backbone amber, variant codons are marked, the highlighted
-  region glows red.
+  region glows red, and a residue picked on the structure or map pulses amber.
 - Hover a base pair for its `c.` position, codon, and amino acid; click it to
   focus that residue on the structure.
 - The CDS is translated and checked against the UniProt sequence; if they differ
