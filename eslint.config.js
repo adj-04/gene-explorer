@@ -25,6 +25,13 @@ export default [
         DOMException: "readonly",
         Blob: "readonly",
         URL: "readonly",
+        URLSearchParams: "readonly",
+        history: "readonly",
+        performance: "readonly",
+        requestAnimationFrame: "readonly",
+        cancelAnimationFrame: "readonly",
+        ResizeObserver: "readonly",
+        MutationObserver: "readonly",
         // Third-party libraries loaded via <script> tags
         $3Dmol: "readonly",
         Ideogram: "readonly"
