@@ -8,6 +8,9 @@ let currentGeneName = "";
 let currentProteinLength = 0;
 let highlightedDomain = null;
 
+const helixData = { gene: "", length: 0, domains: [], variants: [] };
+let requestHelixDraw = () => {};
+
 const RECENT_KEY = "gene-explorer-recent";
 const MAX_RECENT = 3;
 const MAX_VARIANT_CARDS = 60;
@@ -128,6 +131,8 @@ function resetResultPanels() {
   document.getElementById("ideoHint").textContent = "";
   document.getElementById("ideoLocText").textContent = "";
   resetExtraSections();
+  Object.assign(helixData, { gene: "", length: 0, domains: [], variants: [] });
+  requestHelixDraw();
   highlightedDomain = null;
   currentProteinLength = 0;
   currentPdbData = "";
@@ -300,6 +305,10 @@ function renderInterPro(entries, proteinLength) {
 
   const length = Number(proteinLength) || Math.max(1, ...entries.flatMap(e => e.fragments.map(f => f.end)));
   const locatedEntries = entries.filter(e => e.fragments.length > 0);
+  helixData.domains = locatedEntries
+    .filter(e => ["domain", "repeat"].includes(interProTypeClass(e.type)))
+    .flatMap(e => e.fragments.map(fragment => ({ entry: e, fragment })));
+  requestHelixDraw();
   meta.textContent = `${entries.length} InterPro entr${entries.length === 1 ? "y" : "ies"} · ${locatedEntries.length} with sequence coordinates · protein length ${length} aa`;
 
   const track = document.createElement("div");
@@ -642,6 +651,8 @@ async function loadGene() {
     const proteinName = protein.proteinDescription?.recommendedName?.fullName?.value || "Unknown";
     const length = protein.sequence?.length || 0;
     currentProteinLength = length;
+    helixData.gene = gene;
+    helixData.length = length;
     const mass = protein.sequence?.molWeight ? (protein.sequence.molWeight / 1000).toFixed(1) + " kDa" : "-";
     const functionText = cleanText(protein.comments?.find(c => c.commentType === "FUNCTION")?.texts?.[0]?.value) || "No function summary available.";
     const diseaseText = cleanText(protein.comments?.find(c => c.commentType === "DISEASE")?.disease?.description) || "No disease association listed.";
@@ -851,6 +862,7 @@ function highlightDomain(entry, fragment, sourceEl) {
 
   if (isSame) {
     highlightedDomain = null;
+    requestHelixDraw();
     document.getElementById("residueBar").textContent = "Click any residue in the structure to inspect it.";
     viewer.zoomTo({}, 600); // fly back out to the whole protein
     viewer.render();
@@ -859,6 +871,7 @@ function highlightDomain(entry, fragment, sourceEl) {
 
   highlightedDomain = { accession: entry.accession, start: fragment.start, end: fragment.end };
   reapplyDomainHighlight();
+  requestHelixDraw();
 
   document.querySelectorAll(`[data-domain-key="${entry.accession}:${fragment.start}-${fragment.end}"]`)
     .forEach(el => el.classList.add("active"));
@@ -1071,6 +1084,9 @@ function renderVariants(variants, proteinLength) {
   scale.innerHTML = "";
   list.innerHTML = "";
   hint.textContent = "";
+
+  helixData.variants = variants || [];
+  requestHelixDraw();
 
   if (!variants?.length) {
     map.style.display = "none";
@@ -1559,5 +1575,200 @@ function renderExpression(rows, gene) {
       new MutationObserver(queueLayout).observe(page, { attributes: true, attributeFilter: ["hidden", "style"], subtree: true, childList: true });
     }
     queueLayout();
+  });
+})();
+
+
+/* ---------------------------------------------------------------------------
+   Left-margin DNA helix. Purely ambient until a gene loads; then its rungs map
+   onto the protein from residue 1 (top) to the last residue (bottom): domains
+   glow amber, pathogenic variants show as coral rungs, and whatever is
+   highlighted on the structure lights up red. It twists as you scroll.
+   Hover a rung for what's there; click it to highlight that on the structure.
+   The page works exactly the same without it (hidden on smaller screens).
+--------------------------------------------------------------------------- */
+
+(function initHelix() {
+  const W = 88;               // css px
+  const STEP = 9;             // px between rungs
+  const AMP = 26;             // helix radius
+  const TURN = 150;           // px per full turn
+  const reduceMotion = window.matchMedia?.("(prefers-reduced-motion: reduce)").matches;
+  const wide = window.matchMedia("(min-width: 1341px)");
+
+  let wrap, canvas, ctx, tip, H = 0, dpr = 1, raf = 0, lastFrame = 0, hoverRung = -1;
+
+  const C = {
+    strand: "133, 131, 122",
+    rung: "rgba(133, 131, 122, 0.22)",
+    domain: "rgba(232, 169, 74, 0.6)",
+    variant: "rgba(224, 122, 95, 0.9)",
+    highlight: "#ff4d4d",
+    hover: "rgba(232, 230, 223, 0.9)"
+  };
+
+  function rungCount() { return Math.max(1, Math.floor((H - 12) / STEP) + 1); }
+
+  function rungRange(i) {
+    const L = helixData.length;
+    if (!L) return null;
+    const n = rungCount();
+    const start = Math.floor((i / n) * L) + 1;
+    const end = Math.max(start, Math.floor(((i + 1) / n) * L));
+    return { start, end };
+  }
+
+  function rungInfo(i) {
+    const r = rungRange(i);
+    if (!r) return null;
+    const variant = helixData.variants.find(v => v.pos >= r.start && v.pos <= r.end) || null;
+    const domain = helixData.domains.find(d => d.fragment.start <= r.end && d.fragment.end >= r.start) || null;
+    const lit = highlightedDomain && highlightedDomain.start <= r.end && highlightedDomain.end >= r.start;
+    return { ...r, variant, domain, lit };
+  }
+
+  function resize() {
+    if (!wrap) return;
+    dpr = window.devicePixelRatio || 1;
+    H = wrap.clientHeight;
+    canvas.width = Math.round(W * dpr);
+    canvas.height = Math.round(H * dpr);
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    draw(performance.now());
+  }
+
+  function draw(now) {
+    if (!ctx || !H) return;
+    ctx.clearRect(0, 0, W, H);
+    const cx = W / 2;
+    const k = (Math.PI * 2) / TURN;
+    const phase = (reduceMotion ? 0 : now * 0.00045) + window.scrollY * 0.006;
+    const loaded = helixData.length > 0;
+
+    // Backbones: short segments, brighter when the strand is in front
+    for (let s = 0; s < 2; s++) {
+      const offset = s ? Math.PI : 0;
+      let px = null, py = null;
+      for (let y = 6; y <= H - 6; y += 3) {
+        const a = k * y + phase + offset;
+        const x = cx + AMP * Math.sin(a);
+        const z = Math.cos(a);
+        if (px !== null) {
+          ctx.strokeStyle = `rgba(${C.strand}, ${0.12 + 0.45 * (z + 1) / 2})`;
+          ctx.lineWidth = 1 + 0.8 * (z + 1) / 2;
+          ctx.beginPath(); ctx.moveTo(px, py); ctx.lineTo(x, y); ctx.stroke();
+        }
+        px = x; py = y;
+      }
+    }
+
+    // Rungs (base pairs)
+    const n = rungCount();
+    for (let i = 0; i < n; i++) {
+      const y = 6 + i * STEP;
+      const a = k * y + phase;
+      const x1 = cx + AMP * Math.sin(a);
+      const x2 = cx - AMP * Math.sin(a);
+      const depth = 0.45 + 0.55 * Math.abs(Math.cos(a));
+      const info = loaded ? rungInfo(i) : null;
+
+      let color = C.rung, width = 1, glow = 0;
+      if (info?.domain) { color = C.domain; width = 1.3; }
+      if (info?.variant) { color = C.variant; width = 1.5; }
+      if (info?.lit) { color = C.highlight; width = 2; glow = 10; }
+      if (i === hoverRung && loaded) { color = C.hover; width = 2; }
+
+      ctx.globalAlpha = depth;
+      ctx.shadowColor = glow ? C.highlight : "transparent";
+      ctx.shadowBlur = glow;
+      ctx.strokeStyle = color;
+      ctx.lineWidth = width;
+      ctx.beginPath(); ctx.moveTo(x1, y); ctx.lineTo(x2, y); ctx.stroke();
+
+      if (info?.variant || info?.lit) {
+        ctx.fillStyle = info.lit ? C.highlight : C.variant;
+        ctx.beginPath(); ctx.arc(x1, y, info.lit ? 2.4 : 1.8, 0, Math.PI * 2); ctx.fill();
+      }
+    }
+    ctx.globalAlpha = 1;
+    ctx.shadowBlur = 0;
+  }
+
+  function setTip(text, accent) {
+    tip.textContent = text;
+    tip.classList.toggle("accent", !!accent);
+  }
+
+  function idleTip() {
+    setTip(helixData.length ? `${helixData.gene} · 1–${helixData.length} aa` : "", false);
+  }
+
+  function onMove(e) {
+    if (!helixData.length) return;
+    const y = e.clientY - canvas.getBoundingClientRect().top;
+    const i = Math.min(rungCount() - 1, Math.max(0, Math.round((y - 6) / STEP)));
+    if (i !== hoverRung) { hoverRung = i; requestHelixDraw(); }
+    const info = rungInfo(i);
+    if (!info) return;
+    const what = info.variant
+      ? `${variantLabel(info.variant)}${info.variant.diseases[0] ? " · " + info.variant.diseases[0] : ""}`
+      : info.domain ? info.domain.entry.name : "";
+    setTip(`aa ${info.start}–${info.end}${what ? " · " + what : ""}`, !!what);
+    canvas.style.cursor = what ? "pointer" : "default";
+  }
+
+  function onLeave() {
+    hoverRung = -1;
+    canvas.style.cursor = "default";
+    idleTip();
+    requestHelixDraw();
+  }
+
+  function onClick() {
+    if (hoverRung < 0 || !helixData.length) return;
+    const info = rungInfo(hoverRung);
+    if (info?.variant) highlightVariant(info.variant, null);
+    else if (info?.domain) highlightDomain(info.domain.entry, info.domain.fragment, null);
+  }
+
+  function loop(now) {
+    raf = requestAnimationFrame(loop);
+    if (now - lastFrame < 33) return; // ~30fps is plenty for an ambient animation
+    lastFrame = now;
+    draw(now);
+  }
+
+  function syncRunning() {
+    const shouldRun = wide.matches && !document.hidden && !reduceMotion;
+    if (shouldRun && !raf) raf = requestAnimationFrame(loop);
+    if (!shouldRun && raf) { cancelAnimationFrame(raf); raf = 0; }
+  }
+
+  window.addEventListener("load", () => {
+    wrap = document.createElement("div");
+    wrap.className = "helix";
+    wrap.setAttribute("aria-hidden", "true");
+    wrap.innerHTML = `<canvas></canvas><div class="helix-tip"></div>`;
+    document.body.appendChild(wrap);
+    canvas = wrap.querySelector("canvas");
+    ctx = canvas.getContext("2d");
+    tip = wrap.querySelector(".helix-tip");
+
+    requestHelixDraw = () => {
+      if (tip && hoverRung < 0) idleTip();
+      if (!raf) requestAnimationFrame(() => draw(performance.now()));
+    };
+
+    canvas.addEventListener("mousemove", onMove);
+    canvas.addEventListener("mouseleave", onLeave);
+    canvas.addEventListener("click", onClick);
+    window.addEventListener("resize", resize);
+    if (reduceMotion) window.addEventListener("scroll", () => requestHelixDraw(), { passive: true });
+    document.addEventListener("visibilitychange", syncRunning);
+    wide.addEventListener?.("change", () => { resize(); syncRunning(); });
+
+    resize();
+    idleTip();
+    syncRunning();
   });
 })();
