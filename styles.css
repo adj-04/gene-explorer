@@ -275,12 +275,21 @@
     position: absolute; left: 0; width: 16px; height: 0;
     transition: top 0.5s cubic-bezier(0.2, 0.8, 0.2, 1);
   }
+  .jr-zone { position: absolute; top: -28px; bottom: -28px; left: -120px; right: -16px; cursor: pointer; touch-action: none; }
+  .jump-rail.on-window .jr-zone { cursor: grab; }
+  .jump-rail.dragging .jr-zone { cursor: grabbing; }
+  .jump-rail.dragging, .jump-rail.dragging * { user-select: none; }
+  .jump-rail.on-window .jr-window, .jump-rail.dragging .jr-window {
+    border-color: var(--accent); background: rgba(232, 169, 74, 0.14); box-shadow: 0 0 18px rgba(232, 169, 74, 0.3);
+  }
+  .jr-window { transition: border-color 0.2s, background 0.2s, box-shadow 0.2s; }
   .jr-dot {
+    pointer-events: none;
     position: absolute; left: 4px; top: -4px; width: 8px; height: 8px; padding: 0;
     border-radius: 50%; background: var(--bg); border: 1.5px solid var(--text-dim);
     cursor: pointer; transition: transform 0.3s cubic-bezier(0.2, 0.8, 0.2, 1), background 0.25s, border-color 0.25s, box-shadow 0.25s;
   }
-  .jr-dot:hover { background: var(--bg); border-color: var(--accent); transform: scale(1.3); }
+  .jr-item.near .jr-dot { border-color: var(--accent); transform: scale(1.3); }
   .jr-item.passed .jr-dot { border-color: var(--accent); }
   .jr-item.active .jr-dot {
     background: var(--accent); border-color: var(--accent); transform: scale(1.45);
@@ -293,8 +302,10 @@
     color: var(--text-dim); background: var(--bg); padding: 0.15rem 0.4rem; border-radius: 3px;
     transition: opacity 0.25s, transform 0.3s cubic-bezier(0.2, 0.8, 0.2, 1), color 0.25s;
   }
-  .jr-item:hover .jr-label, .jr-dot:focus-visible + .jr-label { opacity: 1; transform: translate(0, -50%); color: var(--text); }
   .jr-item.active .jr-label { opacity: 1; transform: translate(0, -50%); color: var(--accent); }
+  .jr-item.near .jr-label, .jr-dot:focus-visible + .jr-label { opacity: 1; transform: translate(0, -50%); color: var(--text); }
+  .jr-item.near.active .jr-label { color: var(--accent); }
+  .jump-rail.has-near .jr-item.active:not(.near) .jr-label { opacity: 0; transform: translate(8px, -50%); }
 
   .jump-pill { position: fixed; right: 16px; bottom: 16px; z-index: 30; display: none; }
   .jp-button {
