@@ -463,6 +463,34 @@ function renderIdeogram(loc, geneSymbol, geneId) {
     });
   }
 
+  // Ideogram lays the chromosomes out at a fixed min-width, which overflows the
+  // card and adds scrollbars. Give the SVG a viewBox so it scales to fit instead.
+  function fitIdeogram() {
+    const svg = container.querySelector("svg");
+    if (!svg) return;
+    let box;
+    try { box = svg.getBBox(); } catch { return; }
+    if (!box || !box.width || !box.height) return;
+    const pad = 8;
+    const x = box.x - pad, y = box.y - pad, w = box.width + pad * 2, h = box.height + pad * 2;
+    svg.setAttribute("viewBox", `${x} ${y} ${w} ${h}`);
+    svg.setAttribute("preserveAspectRatio", "xMidYMin meet");
+    svg.setAttribute("width", "100%");
+    svg.removeAttribute("height");
+    svg.style.minWidth = "0";
+    svg.style.height = "auto";
+    svg.style.aspectRatio = `${w} / ${h}`;
+    const mid = document.getElementById("_ideogramMiddleWrap");
+    if (mid) { mid.style.height = "auto"; mid.style.overflow = "hidden"; }
+    const inner = document.getElementById("_ideogramInnerWrap");
+    if (inner) {
+      inner.style.position = "relative";
+      inner.style.overflow = "visible";
+      inner.style.maxWidth = "none";
+      inner.style.width = "100%";
+    }
+  }
+
   try {
     new Ideogram({
       container: "#ideoContainer",
@@ -472,7 +500,7 @@ function renderIdeogram(loc, geneSymbol, geneId) {
       annotationsLayout: "overlay",
       annotationHeight: 6,
       annotations: annotation,
-      onLoad: wireClickThrough
+      onLoad: () => { fitIdeogram(); wireClickThrough(); }
     });
   } catch (e) {
     console.error("Ideogram render failed", e);
@@ -1249,7 +1277,10 @@ function renderExpression(rows, gene) {
   const MIN_GAP = 22;
   const reduceMotion = window.matchMedia?.("(prefers-reduced-motion: reduce)").matches;
 
-  let rail, railInner, fill, win, pill, pillLabel, pillBar, menu;
+  let rail, railInner, fill, win, zone, pill, pillLabel, pillBar, menu;
+  let nearItem = null;
+  let drag = null;
+  const NEAR_PX = 36;      // how close (vertically) the cursor must be to a dot to reveal its name
   let items = [];
   let itemsKey = "";
   let activeSel = null;
@@ -1263,15 +1294,15 @@ function renderExpression(rows, gene) {
   function decode(el, text) {
     if (!el) return;
     const prev = decoding.get(el);
-    if (prev) cancelAnimationFrame(prev);
+    if (prev) clearTimeout(prev);
     if (reduceMotion) { el.textContent = text; return; }
     const HOLD = 160;   // ms of pure DNA before typing starts
     const PER = 42;     // ms per typed letter
     const FLICKER = 55; // ms between base reshuffles
-    let start = null, lastShuffle = -1, strand = "";
-    const tick = now => {
-      if (start === null) start = now;
-      const t = now - start;
+    const start = performance.now();
+    let lastShuffle = -1, strand = "";
+    const tick = () => {
+      const t = performance.now() - start;
       const typed = t < HOLD ? 0 : Math.min(text.length, Math.floor((t - HOLD) / PER) + 1);
       const shuffle = Math.floor(t / FLICKER);
       if (shuffle !== lastShuffle) {
@@ -1284,9 +1315,9 @@ function renderExpression(rows, gene) {
         return;
       }
       el.innerHTML = `${escapeHtml(text.slice(0, typed))}<span class="dna-caret"></span><span class="dna">${strand.slice(typed)}</span>`;
-      decoding.set(el, requestAnimationFrame(tick));
+      decoding.set(el, setTimeout(tick, 30));
     };
-    decoding.set(el, requestAnimationFrame(tick));
+    tick();
   }
 
   const find = sel => (sel.startsWith(".") ? document.querySelector(sel) : document.getElementById(sel));
@@ -1298,15 +1329,12 @@ function renderExpression(rows, gene) {
     rail.className = "jump-rail";
     rail.setAttribute("aria-label", "Jump to section");
     rail.hidden = true;
-    rail.innerHTML = `<div class="jr-inner"><div class="jr-track"></div><div class="jr-fill"></div><div class="jr-window"></div></div>`;
+    rail.innerHTML = `<div class="jr-inner"><div class="jr-track"></div><div class="jr-fill"></div><div class="jr-window"></div><div class="jr-zone"></div></div>`;
     railInner = rail.querySelector(".jr-inner");
     fill = rail.querySelector(".jr-fill");
     win = rail.querySelector(".jr-window");
-    rail.querySelector(".jr-track").addEventListener("click", e => {
-      const r = railInner.getBoundingClientRect();
-      const frac = Math.min(1, Math.max(0, (e.clientY - r.top) / r.height));
-      window.scrollTo({ top: frac * docHeight() - window.innerHeight / 2, behavior: reduceMotion ? "auto" : "smooth" });
-    });
+    zone = rail.querySelector(".jr-zone");
+    wireZone();
 
     pill = document.createElement("div");
     pill.className = "jump-pill";
@@ -1336,6 +1364,82 @@ function renderExpression(rows, gene) {
     document.body.append(rail, pill);
   }
 
+  /* Pointer handling for the whole rail area: the nearest dot's name appears as
+     soon as the cursor is anywhere close; the glowing window can be dragged
+     like a scrollbar; a click jumps to the nearest section (or to that point). */
+  function railY(e) { return e.clientY - railInner.getBoundingClientRect().top; }
+
+  function nearest(y, maxDist = NEAR_PX) {
+    let best = null, bestD = Infinity;
+    items.forEach(it => { const d = Math.abs(it.y - y); if (d < bestD) { bestD = d; best = it; } });
+    return bestD <= maxDist ? best : null;
+  }
+
+  function onWindow(y) {
+    const top = parseFloat(win.style.top) || 0;
+    const h = parseFloat(win.style.height) || 0;
+    return y >= top - 6 && y <= top + h + 6;
+  }
+
+  function setNear(it) {
+    if (it === nearItem) return;
+    nearItem?.item.classList.remove("near");
+    nearItem = it;
+    rail.classList.toggle("has-near", !!it);
+    if (it) {
+      it.item.classList.add("near");
+      decode(it.labelEl, it.label);
+    }
+  }
+
+  function wireZone() {
+    zone.addEventListener("pointermove", e => {
+      const y = railY(e);
+      if (drag) {
+        const dy = e.clientY - drag.startY;
+        if (Math.abs(dy) > 3) drag.moved = true;
+        if (drag.moved && drag.grab) {
+          const railH = railInner.clientHeight || 1;
+          window.scrollTo({ top: drag.startScroll + dy * (docHeight() / railH), behavior: "auto" });
+        }
+        if (drag.grab) return;
+      }
+      setNear(nearest(y));
+      rail.classList.toggle("on-window", onWindow(y));
+    });
+    zone.addEventListener("pointerleave", () => {
+      if (drag) return;
+      setNear(null);
+      rail.classList.remove("on-window");
+    });
+    zone.addEventListener("pointerdown", e => {
+      if (e.button !== 0) return;
+      const y = railY(e);
+      drag = { startY: e.clientY, startScroll: window.scrollY, moved: false, grab: onWindow(y) };
+      zone.setPointerCapture(e.pointerId);
+      if (drag.grab) rail.classList.add("dragging");
+      e.preventDefault();
+    });
+    const end = e => {
+      if (!drag) return;
+      const y = railY(e);
+      if (!drag.moved) {
+        const it = nearest(y, 16);
+        if (it) go(it);
+        else {
+          const railH = railInner.clientHeight || 1;
+          const frac = Math.min(1, Math.max(0, y / railH));
+          window.scrollTo({ top: frac * docHeight() - window.innerHeight / 2, behavior: reduceMotion ? "auto" : "smooth" });
+        }
+      }
+      drag = null;
+      rail.classList.remove("dragging");
+      try { zone.releasePointerCapture(e.pointerId); } catch { /* ignore */ }
+    };
+    zone.addEventListener("pointerup", end);
+    zone.addEventListener("pointercancel", end);
+  }
+
   function go(it) {
     const top = it.node.getBoundingClientRect().top + window.scrollY - 20;
     window.scrollTo({ top, behavior: reduceMotion ? "auto" : "smooth" });
@@ -1357,6 +1461,8 @@ function renderExpression(rows, gene) {
     if (key !== itemsKey) {
       itemsKey = key;
       railInner.querySelectorAll(".jr-item").forEach(n => n.remove());
+      nearItem = null;
+      rail.classList.remove("has-near");
       menu.innerHTML = "";
       items = found.map(s => {
         const item = document.createElement("div");
@@ -1364,7 +1470,6 @@ function renderExpression(rows, gene) {
         item.innerHTML = `<button type="button" class="jr-dot" aria-label="Jump to ${s.label}"></button><span class="jr-label">${s.label}</span>`;
         const dot = item.querySelector(".jr-dot");
         const label = item.querySelector(".jr-label");
-        item.addEventListener("mouseenter", () => decode(label, s.label));
         dot.addEventListener("focus", () => decode(label, s.label));
         railInner.appendChild(item);
 
@@ -1374,7 +1479,7 @@ function renderExpression(rows, gene) {
         option.textContent = s.label;
         menu.appendChild(option);
 
-        const it = { ...s, item, dot, label, option, top: 0, y: 0 };
+        const it = { ...s, item, dot, labelEl: label, option, top: 0, y: 0 };
         dot.addEventListener("click", () => go(it));
         option.addEventListener("click", () => go(it));
         return it;
@@ -1382,6 +1487,13 @@ function renderExpression(rows, gene) {
       activeSel = null;
     } else {
       items.forEach((it, i) => { it.node = found[i].node; });
+    }
+
+    // Stretch the hover zone left into the empty margin, but never over the content
+    const page = document.querySelector(".page");
+    if (page && !rail.hidden) {
+      const gap = rail.getBoundingClientRect().left - page.getBoundingClientRect().right;
+      zone.style.left = `-${Math.round(Math.min(140, Math.max(24, gap - 16)))}px`;
     }
 
     const docH = docHeight();
@@ -1408,9 +1520,13 @@ function renderExpression(rows, gene) {
     win.style.top = `${(y / docH) * railH}px`;
     win.style.height = `${Math.max(12, (vh / docH) * railH)}px`;
 
-    const probe = y + vh * 0.35;
-    let current = items[0];
-    items.forEach(it => { if (it.top <= probe) current = it; });
+    // Active section = the one taking up the most of the screen right now
+    let current = items[0], bestVisible = -1;
+    items.forEach((it, i) => {
+      const end = i + 1 < items.length ? items[i + 1].top : docH;
+      const visible = Math.min(end, y + vh) - Math.max(it.top, y);
+      if (visible > bestVisible) { bestVisible = visible; current = it; }
+    });
     if (y + vh >= docH - 4) current = items[items.length - 1];
 
     fill.style.height = `${current.y}px`;
@@ -1425,7 +1541,7 @@ function renderExpression(rows, gene) {
 
     if (current.sel !== activeSel) {
       activeSel = current.sel;
-      decode(current.label && current.item.querySelector(".jr-label"), current.label);
+      decode(current.labelEl, current.label);
       if (!pill.hidden) decode(pillLabel, current.label);
     }
   }
