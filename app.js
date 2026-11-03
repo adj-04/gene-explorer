@@ -11,6 +11,7 @@ let highlightedDomain = null;
 const helixData = { gene: "", length: 0, domains: [], variants: [], cds: "", transcript: "", cdsMatches: null, cdsState: "" };
 let requestHelixDraw = () => {};
 let focusHelix = () => {};
+let setRailMarker = () => {};
 
 const RECENT_KEY = "gene-explorer-recent";
 const MAX_RECENT = 3;
@@ -132,6 +133,7 @@ function resetResultPanels() {
   document.getElementById("ideoHint").textContent = "";
   document.getElementById("ideoLocText").textContent = "";
   resetExtraSections();
+  returnNav.clear();
   Object.assign(helixData, { gene: "", length: 0, domains: [], variants: [], cds: "", transcript: "", cdsMatches: null, cdsState: "" });
   requestHelixDraw();
   highlightedDomain = null;
@@ -900,8 +902,93 @@ function highlightDomain(entry, fragment, sourceEl) {
   viewer.zoomTo({ resi: `${Math.max(1, fragment.start - zoomPad)}-${fragment.end + zoomPad}` }, 600);
   viewer.render();
 
-  document.getElementById("viewer")?.scrollIntoView({ behavior: "smooth", block: "center" });
+  // Don't yank the page up to the viewer; offer a way there (and back) instead
+  returnNav.offerStructure();
 }
+
+/* "See it on the structure" / "Back to where you were" chip, plus a
+   you-were-here marker on the section rail while you're away. */
+const returnNav = (() => {
+  let chip = null, returnY = null, arrived = false, hideTimer = 0;
+
+  const viewerInView = () => {
+    const r = document.getElementById("viewer")?.getBoundingClientRect();
+    return !!r && r.bottom > 80 && r.top < window.innerHeight - 80;
+  };
+
+  function ensure() {
+    if (chip) return;
+    chip = document.createElement("button");
+    chip.type = "button";
+    chip.className = "return-chip";
+    chip.hidden = true;
+    document.body.appendChild(chip);
+    chip.addEventListener("click", onChip);
+    window.addEventListener("scroll", onScroll, { passive: true });
+  }
+
+  function show(text, mode) {
+    chip.textContent = text;
+    chip.dataset.mode = mode;
+    chip.hidden = false;
+    chip.classList.remove("in");
+    void chip.offsetWidth;
+    chip.classList.add("in");
+  }
+
+  function hide() {
+    clearTimeout(hideTimer);
+    if (chip) chip.hidden = true;
+  }
+
+  function clear() {
+    returnY = null;
+    arrived = false;
+    setRailMarker(null);
+    hide();
+  }
+
+  function offerStructure() {
+    ensure();
+    if (viewerInView()) return;
+    clear();
+    show("▲ See it on the 3D structure", "go");
+    hideTimer = setTimeout(() => { if (chip.dataset.mode === "go") hide(); }, 7000);
+  }
+
+  function goToStructure() {
+    ensure();
+    returnY = window.scrollY;
+    arrived = false;
+    setRailMarker(returnY);
+    document.getElementById("viewer")?.scrollIntoView({ behavior: "smooth", block: "center" });
+    clearTimeout(hideTimer);
+    show("▼ Back to where you were", "back");
+  }
+
+  function goBack() {
+    if (returnY === null) return;
+    const y = returnY;
+    clear();
+    window.scrollTo({ top: y, behavior: "smooth" });
+  }
+
+  function onChip() {
+    if (chip.dataset.mode === "go") goToStructure();
+    else goBack();
+  }
+
+  function onScroll() {
+    if (!chip || chip.hidden) return;
+    if (chip.dataset.mode === "go" && viewerInView()) { hide(); return; }
+    if (chip.dataset.mode === "back" && returnY !== null) {
+      if (!arrived) { if (viewerInView()) arrived = true; return; }
+      if (Math.abs(window.scrollY - returnY) < 150) clear(); // made it back on their own
+    }
+  }
+
+  return { offerStructure, goBack, clear, hasReturn: () => returnY !== null };
+})();
 
 function toggleSpin() {
   spinning = document.getElementById("spinToggle").checked;
@@ -1305,6 +1392,15 @@ function renderExpression(rows, gene) {
 
   let rail, railInner, fill, win, zone, pill, pillLabel, pillBar, menu;
   let nearItem = null;
+  let here = null, hereY = null;
+
+  function placeHere() {
+    if (!here) return;
+    here.hidden = hereY === null;
+    if (hereY === null) return;
+    const railH = railInner.clientHeight || 1;
+    here.style.top = `${(hereY + window.innerHeight / 2) / docHeight() * railH}px`;
+  }
   let drag = null;
   const NEAR_PX = 36;      // how close (vertically) the cursor must be to a dot to reveal its name
   let items = [];
@@ -1355,12 +1451,17 @@ function renderExpression(rows, gene) {
     rail.className = "jump-rail";
     rail.setAttribute("aria-label", "Jump to section");
     rail.hidden = true;
-    rail.innerHTML = `<div class="jr-inner"><div class="jr-track"></div><div class="jr-fill"></div><div class="jr-window"></div><div class="jr-zone"></div></div>`;
+    rail.innerHTML = `<div class="jr-inner"><div class="jr-track"></div><div class="jr-fill"></div><div class="jr-window"></div><div class="jr-here" hidden><span>you were here</span></div><div class="jr-zone"></div></div>`;
     railInner = rail.querySelector(".jr-inner");
     fill = rail.querySelector(".jr-fill");
     win = rail.querySelector(".jr-window");
     zone = rail.querySelector(".jr-zone");
+    here = rail.querySelector(".jr-here");
     wireZone();
+    setRailMarker = y => {
+      hereY = y;
+      placeHere();
+    };
 
     pill = document.createElement("div");
     pill.className = "jump-pill";
@@ -1449,7 +1550,9 @@ function renderExpression(rows, gene) {
     const end = e => {
       if (!drag) return;
       const y = railY(e);
-      if (!drag.moved) {
+      if (!drag.moved && hereY !== null && Math.abs(y - (parseFloat(here.style.top) || -99)) <= 10) {
+        returnNav.goBack();
+      } else if (!drag.moved) {
         const it = nearest(y, 16);
         if (it) go(it);
         else {
@@ -1532,6 +1635,7 @@ function renderExpression(rows, gene) {
       last = y;
       it.item.style.top = `${y}px`;
     });
+    placeHere();
     update();
   }
 
