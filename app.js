@@ -1732,10 +1732,10 @@ async function loadCds(gene, accession, fullData, requestId, signal) {
   let lastCaption = "";
   let focus = null;   // { res, source } — a single residue lit from the structure or a map
   let pos = 0;        // where the helix sits (bp offset of the top rung); only the user or a jump moves it
-  let pin = null;     // bp offset you were at before the last jump — shown as a pin on the slider
+  let mark = null;    // { start, end, label } — the last thing you selected (structure, map, card or helix); one at a time
   let lastHl = "";    // detects a new highlight so the helix can jump to it
   let lastCds = "";
-  let slider, sMarks, sThumb, sPin, sDrag = null;
+  let slider, sThumb, sPin, sDrag = null, pinHover = false;
 
   const visibleBp = () => Math.max(1, Math.floor((H - TOP * 2) / STEP));
 
@@ -1888,6 +1888,7 @@ async function loadCds(gene, accession, fullData, requestId, signal) {
   }
 
   function idleCaption() {
+    if (pinHover) return;
     let main = "", sub = "", accent = false;
     const fc = focus && codonInfo(focus.res);
     if (fc) {
@@ -1966,18 +1967,16 @@ async function loadCds(gene, accession, fullData, requestId, signal) {
     );
   }
 
-  /* Position, jumps and the "you were here" pin ------------------------- */
+  /* Position, jumps and the last-selection marker ------------------------ */
   function maxOffset() { return Math.max(0, helixData.cds.length - visibleBp()); }
   const clampPos = v => Math.min(maxOffset(), Math.max(0, v));
 
-  // Move the helix. A jump (highlight / structure click) leaves a pin where you were.
+  // Move the helix. jump = moved by a selection rather than by the slider/wheel.
   function moveTo(next, { jump = false } = {}) {
     if (!helixData.cds) return;
     next = clampPos(next);
     if (!jump) focus = null; // scrubbing away from a lit codon
-    if (jump && Math.abs(next - pos) > visibleBp() / 2) pin = pos;
     pos = next;
-    if (pin !== null && Math.abs(pin - pos) < 3) pin = null; // back where you were
     lastCaption = "";
     if (!raf) draw(performance.now(), true);
   }
@@ -1990,7 +1989,8 @@ async function loadCds(gene, accession, fullData, requestId, signal) {
 
   /* Slider: the whole coding sequence, 5′ at the top and 3′ at the bottom.
      Drag the thumb (or anywhere on the track) to scrub; scroll the wheel over
-     the helix or slider to move along it; click the pin to go back. */
+     the helix or slider to move along it. One marker shows your last
+     selection; a new selection replaces it, and clicking it jumps back. */
   function buildSlider() {
     slider = document.createElement("div");
     slider.className = "helix-slider";
@@ -1998,9 +1998,8 @@ async function loadCds(gene, accession, fullData, requestId, signal) {
     slider.setAttribute("role", "slider");
     slider.setAttribute("aria-label", "Position along the coding sequence (5′ to 3′)");
     slider.tabIndex = 0;
-    slider.innerHTML = `<div class="hs-track"></div><div class="hs-marks"></div><div class="hs-thumb"></div>
-      <button type="button" class="hs-pin" hidden><span></span></button>`;
-    sMarks = slider.querySelector(".hs-marks");
+    slider.innerHTML = `<div class="hs-track"></div><div class="hs-thumb"></div>
+      <button type="button" class="hs-pin" hidden aria-label="Go back to your last selection"></button>`;
     sThumb = slider.querySelector(".hs-thumb");
     sPin = slider.querySelector(".hs-pin");
 
@@ -2038,7 +2037,10 @@ async function loadCds(gene, accession, fullData, requestId, signal) {
       e.preventDefault();
       moveTo(Number.isFinite(keys[e.key]) ? pos + keys[e.key] : keys[e.key] < 0 ? 0 : maxOffset());
     });
-    sPin.addEventListener("click", () => { if (pin !== null) moveTo(pin); });
+    sPin.addEventListener("click", () => { if (mark) moveTo(centerOn(mark.start, mark.end)); });
+    // Hovering the marker shows what it is in the helix caption (keeps the page clear)
+    sPin.addEventListener("pointerenter", () => { if (mark) { pinHover = true; setTip(mark.label, "click to go back", true); } });
+    sPin.addEventListener("pointerleave", () => { pinHover = false; lastCaption = ""; });
     return slider;
   }
 
@@ -2047,34 +2049,6 @@ async function loadCds(gene, accession, fullData, requestId, signal) {
     e.preventDefault();
     const bp = Math.sign(e.deltaY) * Math.max(3, Math.round(Math.abs(e.deltaY) / 4));
     moveTo(pos + bp);
-  }
-
-  function renderSliderMarks() {
-    if (!sMarks) return;
-    sMarks.innerHTML = "";
-    const len = helixData.cds.length;
-    if (!len) return;
-    const pct = bp => `${(bp / len) * 100}%`;
-    // Only marks that fall inside this coding sequence (some variant/domain
-    // coordinates refer to other isoforms and run past the end)
-    const lastRes = Math.floor(len / 3);
-    helixData.domains.forEach(d => {
-      const start = Math.max(1, d.fragment.start);
-      const end = Math.min(lastRes, d.fragment.end);
-      if (start > end) return;
-      const el = document.createElement("div");
-      el.className = "hs-domain";
-      el.style.top = pct((start - 1) * 3);
-      el.style.height = pct((end - start + 1) * 3);
-      sMarks.appendChild(el);
-    });
-    helixData.variants.forEach(v => {
-      if (v.pos < 1 || v.pos > lastRes) return;
-      const el = document.createElement("div");
-      el.className = "hs-variant";
-      el.style.top = pct((v.pos - 1) * 3 + 1.5);
-      sMarks.appendChild(el);
-    });
   }
 
   function updateSlider() {
@@ -2089,10 +2063,11 @@ async function loadCds(gene, accession, fullData, requestId, signal) {
     slider.setAttribute("aria-valuemin", "1");
     slider.setAttribute("aria-valuemax", String(len));
     slider.setAttribute("aria-valuenow", String(Math.round(offset) + 1));
-    sPin.hidden = pin === null;
-    if (pin !== null) {
-      sPin.style.top = `${((pin + visibleBp() / 2) / len) * 100}%`;
-      sPin.querySelector("span").textContent = `you were here · c.${Math.round(pin) + 1}`;
+    sPin.hidden = !mark;
+    if (mark) {
+      const mid = ((mark.start - 1) * 3 + mark.end * 3) / 2;
+      sPin.style.top = `${(mid / len) * 100}%`;
+      sPin.title = mark.label;
     }
   }
 
@@ -2134,7 +2109,11 @@ async function loadCds(gene, accession, fullData, requestId, signal) {
     focusHelix = (res, source) => {
       focus = res && codonInfo(res) ? { res, source } : null;
       lastCaption = "";
-      if (focus) moveTo(centerOn(res, res), { jump: true });
+      if (focus) {
+        const c = codonInfo(res);
+        mark = { start: res, end: res, label: `last · c.${c.cStart} ${c.codon} → ${c.aa3}${res}` };
+        moveTo(centerOn(res, res), { jump: true });
+      }
       else if (!raf) draw(performance.now(), true);
     };
 
@@ -2142,13 +2121,15 @@ async function loadCds(gene, accession, fullData, requestId, signal) {
       rebuildFlags();
       if (helixData.cds !== lastCds) {          // new gene / sequence: start at the 5′ end
         lastCds = helixData.cds;
-        pos = 0; pin = null; focus = null; lastHl = "";
-        renderSliderMarks();
-      } else {
-        renderSliderMarks();
+        pos = 0; mark = null; focus = null; lastHl = "";
       }
-      const hl = highlightedDomain ? `${highlightedDomain.start}-${highlightedDomain.end}` : "";
-      if (hl && hl !== lastHl && helixData.cds) moveTo(centerOn(highlightedDomain.start, highlightedDomain.end), { jump: true });
+      const hl = highlightedDomain ? `${highlightedDomain.accession}:${highlightedDomain.start}-${highlightedDomain.end}` : "";
+      if (hl && hl !== lastHl && helixData.cds) {
+        const { start, end } = highlightedDomain;
+        mark = { start, end, hl, label: `last · ${start === end ? `residue ${start}` : `residues ${start}–${end}`}` };
+        moveTo(centerOn(start, end), { jump: true });
+      }
+      if (!hl && lastHl && mark?.hl === lastHl) mark = null; // selection cleared
       lastHl = hl;
       lastCaption = "";
       if (!raf) requestAnimationFrame(() => draw(performance.now(), true));
@@ -2165,4 +2146,4 @@ async function loadCds(gene, accession, fullData, requestId, signal) {
     resize();
     syncRunning();
   });
-})();
+})();s
